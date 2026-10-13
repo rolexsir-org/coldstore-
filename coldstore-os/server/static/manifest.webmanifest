@@ -1,0 +1,14 @@
+{
+  "name": "ColdStore OS — CA Apple Edition",
+  "short_name": "ColdStore",
+  "description": "Inventory, lot traceability and billing for CA apple cold storage",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f4f6f5",
+  "theme_color": "#0f3d2e",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}
