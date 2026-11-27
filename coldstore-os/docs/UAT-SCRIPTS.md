@@ -13,7 +13,7 @@ Notation: `→` expected result. Every step that fails gets a defect ID and a li
 | # | Action | Expected |
 |---|---|---|
 | 1.1 | Log in on the Windows desktop browser | → dashboard for your role only; no Billing/Admin nav |
-| 1.2 | Intake → New receipt: owner, vehicle, gross 10 000 kg, tare 600 kg, crates ×450, variety Gala, grade A | → draft receipt with computed net 9 400 kg |
+| 1.2 | Intake → New receipt: pick an open advice (owner/variety auto-fill), vehicle, gross 10 000 kg, tare 600 kg, crates ×450, variety Gala, grade A | → draft receipt with computed net 9 400 kg, linked to the advice |
 | 1.3 | Try gross < tare | → field-level error, nothing saved |
 | 1.4 | Submit the same receipt twice by double-clicking | → one receipt only (idempotency; second click is a replay) |
 | 1.5 | Verify the receipt into chamber CA-01 | → status VERIFIED; lot number created; stock visible on Lots page |
@@ -52,6 +52,14 @@ Notation: `→` expected result. Every step that fails gets a defect ID and a li
 | 4.3 | Finalize | → stock out; lot `received_kg` reduced; DN number issued |
 | 4.4 | Try to void it as dispatch operator | → blocked; only facility manager can void with reason |
 | 4.5 | Try to dispatch more than the lot contains | → 409 insufficient_stock on finalize draft, per line |
+| 4.6 | Orders → new outward order for the owner's lot, confirm, pick from a chamber, pack, create dispatch | → draft DN tied to the order; finalize deducts only the picked kg; order shows *dispatched* |
+| 4.7 | Pick more than the chamber balance holds | → 409 at pick time, order untouched |
+| 4.8 | After finalize, record delivery: delivered 1 900 + shortage 100 = planned 2 000 → confirm | → delivery *delivered* with audited shortage; wrong split (≠ planned) is rejected |
+| 4.9 | Manager voids the finalized note | → stock restored AND the order re-opens as *packed* |
+| 4.6 | Orders → new outward order for the owner's lot, confirm, pick from a chamber, pack, create dispatch | → draft DN tied to the order; finalize deducts only the picked kg; order shows *dispatched* |
+| 4.7 | Pick more than the chamber balance holds | → 409 at pick time, order untouched |
+| 4.8 | After finalize, record delivery: delivered 1 900 + shortage 100 = planned 2 000 → confirm | → delivery *delivered* with audited shortage; wrong split (≠ planned) is rejected |
+| 4.9 | Manager voids the finalized note | → stock restored AND the order re-opens as *packed* |
 
 ## UAT-5 Billing Operator (`billing1`)
 
@@ -64,6 +72,12 @@ Notation: `→` expected result. Every step that fails gets a defect ID and a li
 | 5.5 | Post payment, leave allocations empty | → auto-allocated oldest-first; statement shows remaining balance |
 | 5.6 | Post the same payment twice within 10 minutes | → duplicate-warning; only Force re-posts |
 | 5.7 | Print invoice | → print HTML shows tariff version snapshot + tax rates used |
+| 5.8 | Billing → generate invoice with an active contract selected, period inside validity | → invoice lines prefer the contract's tariff; outside validity → 409 |
+| 5.9 | Create a credit-note draft on the finalized invoice (billing), approve it (manager) | → outstanding drops by exactly the credit amount; invoice lines unchanged; reject/void leave outstanding alone |
+| 5.10 | Try to credit more than the outstanding | → 409 over-credit guard |
+| 5.8 | Billing → generate invoice with an active contract selected, period inside validity | → invoice lines prefer the contract's tariff; outside validity → 409 |
+| 5.9 | Create a credit-note draft on the finalized invoice (billing), approve it (manager) | → outstanding drops by exactly the credit amount; invoice lines unchanged; reject/void leave outstanding alone |
+| 5.10 | Try to credit more than the outstanding | → 409 over-credit guard |
 
 ## UAT-6 CA Monitor (`monitor`) — Phase 2 telemetry
 
@@ -95,7 +109,34 @@ Notation: `→` expected result. Every step that fails gets a defect ID and a li
 | 8.3 | File a queued intake draft offline, go online, sync | → exactly one server-side record; no duplicate |
 | 8.4 | Telemetry page on phone | → same SIMULATED banner + gap rendering as desktop |
 
+## UAT-9 Contract Operator (`contracts1`) — Phase 2–3
+
+| # | Action | Expected |
+|---|---|---|
+| 9.1 | Contracts → + New contract: owner, season, validity, monthly cycle, one line Gala/A/CRATE 12 000 kg + 500 units | → draft contract `CTR-…` with lines; no billing nav anywhere |
+| 9.2 | Activate your own contract | → blocked (maker ≠ checker); manager activates with a note — audited |
+| 9.3 | + Pre-inward advice for the contract (vehicle, 6 000 kg) | → advice `ADV-…` open |
+| 9.4 | Try to generate an invoice | → 403 (billing deliberately out of scope; tariffs readable for rate reference) |
+| 9.5 | After intake verifies receipts against the advice, open the contract | → expected vs received with variance %; advice auto-*arrived* |
+| 9.6 | Cancel an advice with a reason | → status *cancelled*; receipts still reconcile; audit carries the reason |
+| 9.7 | Offline: create an advice in airplane mode, reconnect | → queued op syncs once; replay is idempotent |
+
+## UAT-10 Quality Inspector (`inspector1`) — Phase 2–3
+
+| # | Action | Expected |
+|---|---|---|
+| 10.1 | Quality → + New inspection on a verified lot: reject 300 kg, downgrade 200 kg to grade B, one check row | → draft `QIN-…`; **stock unchanged** while draft |
+| 10.2 | Try to define a new check/defect criterion | → 403 (criteria master is manager-only) |
+| 10.3 | Manager applies the inspection | → lot received/stored −300; child lot of grade B with 200 kg + parentage; movements audited |
+| 10.4 | Import a grading CSV with one bad row (lot not found) and dry-run it | → validation lists the bad row, **nothing moves**; fix and apply → all-or-nothing |
+| 10.5 | Attach a photo, then re-upload a tampered copy | → valid photo stored with sha256; tampered upload rejected |
+| 10.6 | Try to cancel an applied inspection | → blocked; corrections go through new inspections/approved adjustments |
+| 10.7 | Print the inspection sheet | → print HTML lists quantities, verdict, check results, photo count |
+
 ---
 
-**Exit criterion (D-1):** every row PASS or waived in writing by the facility manager;
+**Exit criterion (D-1):** every row of UAT-1…UAT-10 (10 seeded roles) PASS or waived
+in writing by the facility manager;
 all defects ticketed. Browser/device makes recorded honestly (model + OS version).
+The two physical-device exclusions from TEST-PLAN §"Honest exclusions" (Windows
+desktops + Android handset walkthrough) still apply until executed on site.
