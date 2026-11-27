@@ -73,8 +73,10 @@ def main():
     users = [
         ("admin", "System Administrator", "system_admin", ADMIN_PASSWORD),
         ("manager", "Facility Manager", "facility_manager", "ColdStore#Mgr2026"),
+        ("contracts1", "Contract Operator", "contract_operator", "ColdStore#Ctr2026"),
         ("intake1", "Intake Operator 1", "intake_operator", "ColdStore#Int2026"),
         ("intake2", "Intake Operator 2", "intake_operator", "ColdStore#Int2026"),
+        ("inspector1", "Quality Inspector", "quality_inspector", "ColdStore#Qlt2026"),
         ("invop1", "Inventory Operator 1", "inventory_operator", "ColdStore#Inv2026"),
         ("billing1", "Billing Operator", "billing_operator", "ColdStore#Bil2026"),
         ("dispatch1", "Dispatch Operator", "dispatch_operator", "ColdStore#Dsp2026"),
@@ -120,8 +122,9 @@ def main():
     print("SYNTHETIC demo data seeded. NOT for production use.")
     print("=" * 68)
     print(f"  admin / {ADMIN_PASSWORD}")
-    print("  (other demo passwords: ColdStore#Mgr2026, #Int2026, #Inv2026,")
-    print("   #Bil2026, #Dsp2026, #Aud2026 — all flagged must_change_password)")
+    print("  (other demo passwords: ColdStore#Mgr2026, #Ctr2026, #Int2026,")
+    print("   #Qlt2026, #Inv2026, #Bil2026, #Dsp2026, #Aud2026 — all flagged")
+    print("   must_change_password)")
     print("  Demo tariff 'DEMO' v1 active with PLACEHOLDER rates.")
     print("=" * 68)
 

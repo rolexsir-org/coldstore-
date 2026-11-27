@@ -11,9 +11,11 @@ Legend: ☐ open · ☑ done · — not applicable · Owner initials required on
 |---|---|---|---|
 | A-1 | M0 repository/environment audit complete, decisions recorded | `docs/ARCHITECTURE.md` | ☑ |
 | A-2 | M1 code complete for inventory→billing vertical slice | this repo | ☑ |
-| A-3 | Automated suite ≥ documented set, all passing, run 3× clean | `docs/TEST-PLAN.md` (76/76 at 2026-10-11 incl. lots-perf, telemetry-migration, op-id and config-surface regressions) | ☑ |
+| A-3 | Automated suite ≥ documented set, all passing, run 3× clean | `docs/TEST-PLAN.md` (112/112 at 2026-11-27 — 76 legacy + 36 lifecycle/RBAC tests; incl. lots-perf, telemetry-migration, op-id and config-surface regressions) | ☑ |
 | A-4 | Live E2E intake→verify→dispatch→invoice→payment→statement on seeded DB | session transcript 2026-10-10 | ☑ |
 | A-5 | Simulator/mock data purged from packaging; fresh-install path proven (alembic → bootstrap_admin → config via API, smoke log 2026-10-11) | this repo `scripts/bootstrap_admin.py`, `docs/OPERATIONS.md` §1 | ☑ |
+| A-6 | Phase 2–3 lifecycle backend (workflows A–L): contracts/advices/quality/barcodes/orders/deliveries/credit-notes/new reports; full suite 112/112 | commits `f63a0ca`→`3c0895c` + migration `c4d81f0a9b21`; pytest 112 passed | ☑ |
+| A-7 | Phase 4 operator UI wired for every workflow + live HTTP smoke of the A→K chain on a seeded DB (roles separated; audit trail 25 actions) | README §"Phase 2–4"; smoke transcript 2026-11-27 | ☑ |
 
 ## B. Facility inputs (blocking — supplied by business owner)
 
