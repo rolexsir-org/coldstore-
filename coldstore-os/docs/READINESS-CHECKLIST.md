@@ -11,9 +11,12 @@ Legend: ☐ open · ☑ done · — not applicable · Owner initials required on
 |---|---|---|---|
 | A-1 | M0 repository/environment audit complete, decisions recorded | `docs/ARCHITECTURE.md` | ☑ |
 | A-2 | M1 code complete for inventory→billing vertical slice | this repo | ☑ |
-| A-3 | Automated suite ≥ documented set, all passing, run 3× clean | `docs/TEST-PLAN.md` (76/76 at 2026-10-11 incl. lots-perf, telemetry-migration, op-id and config-surface regressions) | ☑ |
+| A-3 | Automated suite ≥ documented set, all passing, run 3× clean | `docs/TEST-PLAN.md` (112/112 at 2026-11-27 — 76 legacy + 36 lifecycle/RBAC tests; incl. lots-perf, telemetry-migration, op-id and config-surface regressions) | ☑ |
 | A-4 | Live E2E intake→verify→dispatch→invoice→payment→statement on seeded DB | session transcript 2026-10-10 | ☑ |
 | A-5 | Simulator/mock data purged from packaging; fresh-install path proven (alembic → bootstrap_admin → config via API, smoke log 2026-10-11) | this repo `scripts/bootstrap_admin.py`, `docs/OPERATIONS.md` §1 | ☑ |
+| A-6 | Phase 2–3 lifecycle backend (workflows A–L): contracts/advices/quality/barcodes/orders/deliveries/credit-notes/new reports; full suite 112/112 | commits `f63a0ca`→`3c0895c` + migration `c4d81f0a9b21`; pytest 112 passed | ☑ |
+| A-7 | Phase 4 operator UI wired for every workflow + live HTTP smoke of the A→K chain on a seeded DB (roles separated; audit trail 25 actions) | README §"Phase 2–4"; smoke transcript 2026-11-27 | ☑ |
+| A-8 | Final acceptance report: deliverables status-labeled, 14-scenario matrix, live backup→restore + restart-recovery drills, secrets scan | `docs/ACCEPTANCE.md` | ☑ |
 
 ## B. Facility inputs (blocking — supplied by business owner)
 
@@ -37,13 +40,13 @@ Legend: ☐ open · ☑ done · — not applicable · Owner initials required on
 | C-3 | Demo users/passwords removed; real per-person accounts created; passwords changed | ◑ packaging contains zero demo data (data-dir wiped 2026-10-11; `seed_demo.py` refuses under `COLDSTORE_ENV=production`); **per-person accounts to be created on site from the real staff roster** |
 | C-4 | Data directory ACLs: service account only; host firewall rules documented | ☐ |
 | C-5 | Scheduled backups + OFF-HOST copy verified (2 consecutive weeks) | ☐ |
-| C-6 | Secrets-scan of deployed bundle clean; app logs show no credentials | ☐ |
+| C-6 | Secrets-scan of deployed bundle clean; app logs show no credentials | ◑ repo-bundle regex sweep 2026-11-27 clean (`docs/ACCEPTANCE.md` §3 — documented demo seeds only); re-scan the *deployed* bundle at install |
 
 ## D. Operational acceptance (M3 pilot)
 
 | # | Gate | Criterion | Status |
 |---|---|---|---|
-| D-1 | UAT per role (8 roles) using scripted scenarios | each role completes its workflow unaided; defects triaged | ☐ |
+| D-1 | UAT per role (10 roles seeded; UAT-1…UAT-10) using scripted scenarios | each role completes its workflow unaided; defects triaged | ☐ |
 | D-2 | Opening stock reconciliation | physical count == system stock per chamber; discrepancies resolved via approved adjustments | ☐ |
 | D-3 | Billing parallel run | 30 days of invoicing parallel with existing method: every variance explained | ☐ |
 | D-4 | Android PWA field trial | airplane-mode intake + dispatch queue, reconnection sync, conflict resolution — all visible, none silent | ☐ |

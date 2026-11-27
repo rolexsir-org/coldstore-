@@ -25,12 +25,24 @@ class Replay(Exception):
         self.payload = payload
 
 
+class DuplicateOp(Exception):
+    """A client submitted an operation_id already processed for ANOTHER user.
+    Distinct from Replay: no stored response is ever leaked cross-user."""
+    def __init__(self, operation_id: str):
+        super().__init__(operation_id)
+        self.operation_id = operation_id
+
+
 def begin(db: Session, operation_id: str | None, user_id: int, endpoint: str) -> None:
     if not operation_id:
         return
     row = db.get(ProcessedOp, operation_id)
-    if row is not None and row.user_id == user_id:
-        raise Replay(row.status_code, row.response_json)
+    if row is not None:
+        if row.user_id == user_id:
+            raise Replay(row.status_code, row.response_json)
+        # someone else's operation id: never leak their response — a clean 409
+        # instead of a PK IntegrityError (500) at finish()
+        raise DuplicateOp(operation_id)
 
 
 def finish(db: Session, operation_id: str | None, user_id: int, endpoint: str,

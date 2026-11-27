@@ -18,7 +18,8 @@ from .config import PASSWORD_MIN_LEN, PBKDF2_ITERATIONS, SESSION_HOURS
 ALGO = "pbkdf2"
 
 ROLES = [
-    "system_admin", "facility_manager", "intake_operator", "inventory_operator",
+    "system_admin", "facility_manager", "contract_operator", "intake_operator",
+    "quality_inspector", "inventory_operator",
     "billing_operator", "dispatch_operator", "ca_monitor", "auditor",
 ]
 
@@ -31,28 +32,54 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "lots.read", "lots.write", "chambers.read", "chambers.write",
         "movements.write", "dispatch.read", "dispatch.write", "dispatch.void",
         "adjustments.create", "adjustments.approve",
-        "billing.read", "billing.write", "billing.void", "payments.write",
+        "billing.read", "billing.write", "billing.void", "billing.approve",
+        "payments.write",
+        "contracts.read", "contracts.write", "contracts.approve",
+        "inward.read", "inward.write",
+        "quality.read", "quality.write", "quality.approve",
+        "barcodes.read", "barcodes.issue",
+        "orders.read", "orders.write",
+        "deliveries.read", "deliveries.write",
         "reports.read", "reports.financial", "audit.read", "backups.manage",
         "users.read",
         "telemetry.read", "telemetry.ack", "telemetry.config",
     },
+    "contract_operator": {
+        "masters.read", "parties.read",
+        "contracts.read", "contracts.write",
+        "inward.read", "inward.write",
+        "tariffs.read", "reports.read", "intake.read",
+    },
     "intake_operator": {
         "masters.read", "parties.read", "parties.write",
         "intake.read", "intake.write", "intake.verify",
+        "inward.read", "inward.write",
+        "barcodes.read", "barcodes.issue",
+        "quality.read",
         "lots.read", "chambers.read", "reports.read",
+    },
+    "quality_inspector": {
+        "masters.read", "parties.read",
+        "quality.read", "quality.write",
+        "lots.read", "chambers.read", "barcodes.read", "intake.read", "reports.read",
     },
     "inventory_operator": {
         "masters.read", "parties.read", "lots.read", "lots.write",
-        "chambers.read", "movements.write", "adjustments.create", "reports.read",
+        "chambers.read", "movements.write", "adjustments.create",
+        "barcodes.read", "barcodes.issue", "orders.read", "reports.read",
     },
     "billing_operator": {
         "masters.read", "parties.read", "lots.read", "chambers.read",
         "billing.read", "billing.write", "payments.write", "reports.read", "reports.financial",
+        "contracts.read", "tariffs.read",
         "intake.read", "dispatch.read",
     },
     "dispatch_operator": {
         "masters.read", "parties.read", "lots.read", "chambers.read",
-        "dispatch.read", "dispatch.write", "reports.read",
+        "dispatch.read", "dispatch.write",
+        "orders.read", "orders.write",
+        "deliveries.read", "deliveries.write",
+        "barcodes.read", "reports.read",
     },
     "ca_monitor": {
         "chambers.read", "masters.read",
@@ -63,6 +90,8 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "masters.read", "parties.read", "intake.read", "lots.read", "chambers.read",
         "dispatch.read", "billing.read", "reports.read", "reports.financial",
         "audit.read", "users.read", "telemetry.read",
+        "contracts.read", "inward.read", "quality.read", "barcodes.read",
+        "orders.read", "deliveries.read", "tariffs.read",
     },
 }
 

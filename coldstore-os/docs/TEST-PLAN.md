@@ -57,3 +57,30 @@ sync, telemetry SIMULATED-banner verification and gap rendering.
 6. **Telemetry vendor gateway**: contract validated against the simulator only. A real
    vendor gateway integration is a separate commissioning milestone (M4) with its own
    chaos tests — and the same no-control static scan.
+
+---
+
+## Phase 2–3 addendum (2026-11-27) — lifecycle tests
+
+36 tests appended across `tests/test_contracts.py`, `test_quality.py`,
+`test_barcodes.py`, `test_orders.py`, `test_creditnotes.py`,
+`test_reports_new.py`, `test_rbac_new.py`. **Result: 112 passed, 0 failed**
+(217 s wall on the sandbox, SQLite). Highlights:
+
+- Contracts: maker/checker activate, close reasons, billing-period link,
+  reconciliation over VERIFIED receipts only, cross-owner 403/409 paths.
+- Quality: verdict-only apply moves nothing; reject posts ONE audited movement
+  (chamber or un-allocated) and reduces received_kg; downgrade reuses the
+  split-with-regrade path (child lot); grading import is all-or-nothing with
+  dry-run default; photo sha256 mismatch → 500.
+- Barcodes: `CS1-R/L/C-…` code grammar, overlapping re-issue → 409, adjacent
+  OK, void blocks resolve/print, print bumps print_count, QR sheet is real SVG.
+- Orders: confirm validates availability, pick > chamber balance → 409, > line
+  qty → 409, packing requires a pick, dispatch from order creates a DRAFT note
+  (deduction only at finalize), void restores stock and reopens the order.
+- Credit notes: draft → approve/reject/void; only APPROVED reduces outstanding;
+  over-credit guarded; invoice never edited.
+- Reports: inward/outward registers, daily summary, occupancy history (ledger
+  replay), stock-by; financial reports gated behind `reports.financial`.
+- RBAC: 10-role scope matrix incl. the deliberate split `contract_operator`
+  (no `billing.read`) vs `tariffs.read`; no-scope → 403.

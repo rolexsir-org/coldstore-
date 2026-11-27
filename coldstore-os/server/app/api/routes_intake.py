@@ -12,8 +12,8 @@ from .. import idempotency as idem
 from ..audit import audit, snapshot
 from ..db import get_db
 from ..domain import inventory as dom
-from ..models import (Chamber, Grade, IntakeReceipt, Lot, Package, Party, PartyRole,
-                      Season, StockBalance, Variety)
+from ..models import (Chamber, Grade, InwardAdvice, IntakeReceipt, Lot, Package, Party,
+                      PartyRole, Season, StockBalance, Variety)
 from ..schemas import ReceiptCorrectIn, ReceiptIn, ReceiptVerifyIn
 from .deps import current_user, require
 
@@ -31,6 +31,7 @@ def _dump(r: IntakeReceipt):
             "variety_id": r.variety_id, "grade_id": r.grade_id,
             "harvest_year": r.harvest_year, "condition_notes": r.condition_notes,
             "status": r.status, "supersedes_id": r.supersedes_id,
+            "advice_id": r.advice_id,
             "correction_reason": r.correction_reason, "created_at": str(r.created_at)}
 
 
@@ -52,6 +53,14 @@ def _check_refs(db: Session, body: ReceiptIn):
         raise HTTPException(422, "unknown grade")
     if db.get(Package, body.packaging_id) is None:
         raise HTTPException(422, "unknown packaging")
+    if body.advice_id is not None:
+        a = db.get(InwardAdvice, body.advice_id)
+        if a is None:
+            raise HTTPException(422, "unknown advice")
+        if a.status not in ("open", "arrived"):
+            raise HTTPException(422, f"advice {a.advice_no} is {a.status} — not intakeable")
+        if a.owner_id != body.owner_id:
+            raise HTTPException(422, "receipt owner differs from advice owner")
 
 
 def _dup_window(db: Session, body: ReceiptIn) -> IntakeReceipt | None:
@@ -89,9 +98,18 @@ def create_receipt(body: ReceiptIn, db: Session = Depends(get_db),
         tare_kg=body.tare_kg, net_kg=body.net_kg, packaging_id=body.packaging_id,
         unit_count=body.unit_count, variety_id=body.variety_id, grade_id=body.grade_id,
         harvest_year=body.harvest_year, condition_notes=body.condition_notes,
+        advice_id=body.advice_id,
         created_by=user.id, operation_id=body.operation_id)
     db.add(r)
     db.flush()
+    # the advice has physically started arriving
+    if body.advice_id is not None:
+        a = db.get(InwardAdvice, body.advice_id)
+        if a.status == "open":
+            a.status = "arrived"
+            audit(db, actor=user, action="advice.arrived", entity_type="inward_advice",
+                  entity_id=a.advice_no, after={"status": "arrived"},
+                  operation_id=body.operation_id)
     audit(db, actor=user, action="receipt.create", entity_type="intake_receipt",
           entity_id=r.receipt_no, after=_dump(r), operation_id=body.operation_id)
     resp = _dump(r)

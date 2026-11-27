@@ -11,8 +11,9 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import idempotency as idem
-from .api import (routes_admin, routes_auth, routes_billing, routes_dispatch,
-                  routes_intake, routes_inventory, routes_masters, routes_parties,
+from .api import (routes_admin, routes_auth, routes_barcodes, routes_billing,
+                  routes_contracts, routes_dispatch, routes_intake, routes_inventory,
+                  routes_masters, routes_outward, routes_parties, routes_quality,
                   routes_reports)
 from .config import API_V1, ensure_dirs
 from .db import engine
@@ -45,6 +46,14 @@ def create_app() -> FastAPI:
         return JSONResponse(status_code=exc.status_code, content=exc.payload,
                             headers={"Idempotent-Replay": "true"})
 
+    @app.exception_handler(idem.DuplicateOp)
+    async def _dup_op(_req: Request, exc: idem.DuplicateOp):
+        return JSONResponse(status_code=409,
+                            content={"detail": "operation_id already processed by "
+                                               "another user — client must generate a "
+                                               "fresh id", "code": "duplicate",
+                                     "operation_id": exc.operation_id})
+
     @app.middleware("http")
     async def _access_log(request: Request, call_next):
         rid = str(uuid.uuid4())[:8]
@@ -68,8 +77,10 @@ def create_app() -> FastAPI:
         return {"status": "ready"}
 
     for r in (routes_auth.router, routes_masters.router, routes_parties.router,
-              routes_intake.router, routes_inventory.router, routes_dispatch.router,
-              routes_billing.router, routes_reports.router, routes_admin.router):
+              routes_contracts.router, routes_intake.router, routes_inventory.router,
+              routes_quality.router, routes_barcodes.router, routes_dispatch.router,
+              routes_outward.router, routes_billing.router, routes_reports.router,
+              routes_admin.router):
         app.include_router(r, prefix=API_V1)
 
     # ---------------- Phase 2 telemetry (isolated, monitoring-only) ----------------

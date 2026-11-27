@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from ..audit import audit, snapshot
 from ..models import (
     Adjustment, Chamber, DispatchLine, DispatchNote, IntakeReceipt, Lot, LotParent,
-    Movement, Package, StockBalance,
+    Movement, OutwardOrder, Package, StockBalance,
 )
 
 
@@ -360,3 +360,13 @@ def void_dispatch(db: Session, *, dn: DispatchNote, reason: str, actor, operatio
     audit(db, actor=actor, action="dispatch.void", entity_type="dispatch",
           entity_id=dn.dispatch_no, before={"status": "finalized"},
           after={"status": "void"}, reason=reason, operation_id=operation_id)
+    # an order-linked dispatch returning stock reopens the order for re-dispatch
+    if dn.order_id is not None:
+        order = db.get(OutwardOrder, dn.order_id)
+        if order is not None and order.status == "dispatched":
+            order.status = "packed"
+            order.dispatch_id = None
+            audit(db, actor=actor, action="order.reopen", entity_type="outward_order",
+                  entity_id=order.order_no, before={"status": "dispatched"},
+                  after={"status": "packed"}, reason=f"dispatch {dn.dispatch_no} voided",
+                  operation_id=operation_id)

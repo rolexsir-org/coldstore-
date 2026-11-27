@@ -34,6 +34,7 @@ def _dump(db: Session, dn: DispatchNote):
             "id_proof_type": dn.id_proof_type, "id_proof_no": dn.id_proof_no,
             "vehicle_no": dn.vehicle_no, "destination": dn.destination,
             "status": dn.status, "void_reason": dn.void_reason, "notes": dn.notes,
+            "order_id": dn.order_id,
             "total_kg": float(_total_kg(lines)),
             "lines": [{"lot_id": l.lot_id,
                        "lot_no": db.get(Lot, l.lot_id).lot_no,

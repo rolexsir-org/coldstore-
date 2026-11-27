@@ -67,6 +67,7 @@ class ReceiptIn(BaseModel):
     grade_id: int
     harvest_year: int = Field(ge=2000, le=2100)
     condition_notes: str = ""
+    advice_id: int | None = None  # pre-inward advice this receipt fulfils
     operation_id: str | None = None
     force: bool = False  # confirm despite duplicate warning
 
@@ -227,6 +228,7 @@ class GenerateInvoiceIn(BaseModel):
     period_from: date
     period_to: date
     tariff_id: int | None = None   # default: owner's contract tariff else active default
+    contract_id: int | None = None  # contract-linked billing (validity enforced)
     discount_minor: int = Field(default=0, ge=0)
     due_date: date | None = None
     operation_id: str | None = None
@@ -247,3 +249,198 @@ class PaymentIn(BaseModel):
     allocations: list[PaymentAllocIn] = []   # empty → auto-allocate oldest outstanding
     operation_id: str | None = None
     force: bool = False
+
+
+# ---- contracts (A) & pre-inward (B)
+class ContractLineIn(BaseModel):
+    variety_id: int
+    grade_id: int | None = None
+    package_id: int
+    expected_kg: float = Field(ge=0)
+    expected_units: int = Field(ge=0, default=0)
+
+
+class ContractIn(BaseModel):
+    season_id: int
+    owner_id: int
+    title: str = ""
+    valid_from: date
+    valid_to: date
+    tariff_id: int | None = None
+    billing_cycle: str = "monthly"   # monthly|seasonal|on_dispatch
+    payment_terms_days: int = Field(default=30, ge=0, le=365)
+    notes: str = ""
+    lines: list[ContractLineIn] = Field(min_length=1)
+    operation_id: str | None = None
+
+
+class ContractActionIn(BaseModel):
+    reason: str = Field(min_length=3)
+    operation_id: str | None = None
+
+
+class AdviceIn(BaseModel):
+    contract_id: int | None = None
+    season_id: int
+    owner_id: int
+    expected_arrival_date: date
+    vehicle_no: str = ""
+    expected_kg: float = Field(ge=0)
+    expected_units: int = Field(ge=0, default=0)
+    package_id: int
+    variety_id: int
+    grade_id: int | None = None
+    harvest_year: int = Field(ge=2000, le=2100)
+    notes: str = ""
+    operation_id: str | None = None
+
+
+class AdviceActionIn(BaseModel):
+    reason: str = Field(min_length=3)
+    operation_id: str | None = None
+
+
+# ---- quality (E)
+class QualityCheckIn(BaseModel):
+    code: str = Field(min_length=2, max_length=24)
+    name: str = Field(min_length=2, max_length=80)
+    kind: str = "check"   # check|defect
+    description: str = ""
+
+
+class InspectionItemIn(BaseModel):
+    check_id: int
+    result: str = "pass"  # pass|fail|na|defect
+    value: str = ""
+    notes: str = ""
+
+
+class InspectionIn(BaseModel):
+    lot_id: int
+    sampled_units: int = Field(ge=0, default=0)
+    accepted_kg: float = Field(ge=0, default=0)
+    rejected_kg: float = Field(ge=0, default=0)
+    downgraded_kg: float = Field(ge=0, default=0)
+    target_grade_id: int | None = None
+    verdict: str = "pass"  # pass|conditional|fail
+    notes: str = ""
+    items: list[InspectionItemIn] = []
+    operation_id: str | None = None
+
+
+class InspectionApplyIn(BaseModel):
+    """Where the rejected/downgraded quantity sits. If chamber_id is omitted the
+    quantity must be un-allocated stock of the lot (never stored)."""
+    chamber_id: int | None = None
+    package_id: int | None = None
+    reason: str = Field(min_length=3)
+    operation_id: str | None = None
+
+
+class GradingImportRowIn(BaseModel):
+    lot_no: str
+    rejected_kg: float = Field(ge=0, default=0)
+    downgraded_kg: float = Field(ge=0, default=0)
+    target_grade_code: str | None = None
+    chamber_id: int | None = None
+    package_id: int | None = None
+    verdict: str = "pass"
+    notes: str = ""
+
+
+class GradingImportIn(BaseModel):
+    rows: list[GradingImportRowIn] = Field(min_length=1)
+    dry_run: bool = True
+    operation_id: str | None = None
+
+
+# ---- barcodes (D)
+class BarcodeIssueIn(BaseModel):
+    kind: str   # receipt|lot|crate_range
+    entity_id: int
+    unit_from: int | None = Field(default=None, ge=1)
+    unit_to: int | None = Field(default=None, ge=1)
+    notes: str = ""
+    operation_id: str | None = None
+
+
+class BarcodeVoidIn(BaseModel):
+    reason: str = Field(min_length=3)
+    operation_id: str | None = None
+
+
+# ---- outward orders, packing, delivery (H, I)
+class OrderLineIn(BaseModel):
+    variety_id: int | None = None
+    grade_id: int | None = None
+    lot_id: int | None = None
+    qty_kg: float = Field(ge=0, default=0)
+    units: int = Field(ge=0, default=0)
+    note: str = ""
+
+
+class OrderIn(BaseModel):
+    season_id: int
+    owner_id: int
+    destination: str = ""
+    notes: str = ""
+    lines: list[OrderLineIn] = Field(min_length=1)
+    operation_id: str | None = None
+
+
+class OrderActionIn(BaseModel):
+    reason: str = ""
+    operation_id: str | None = None
+
+
+class PickIn(BaseModel):
+    line_id: int
+    lot_id: int
+    chamber_id: int
+    package_id: int
+    qty_kg: float = Field(gt=0)
+    units: int = Field(ge=0, default=0)
+    operation_id: str | None = None
+
+
+class PackingIn(BaseModel):
+    package_id: int
+    unit_count: int = Field(ge=0)
+    gross_kg: float = Field(ge=0, default=0)
+    tare_kg: float = Field(ge=0, default=0)
+    notes: str = ""
+    operation_id: str | None = None
+
+
+class DeliveryIn(BaseModel):
+    dispatch_id: int
+    vehicle_no: str = ""
+    driver_name: str = ""
+    departed_at: datetime | None = None
+    notes: str = ""
+    operation_id: str | None = None
+
+
+class DeliveryConfirmIn(BaseModel):
+    status: str  # delivered|shortage|damaged
+    delivered_kg: float = Field(ge=0)
+    delivered_units: int = Field(ge=0, default=0)
+    shortage_kg: float = Field(ge=0, default=0)
+    damage_kg: float = Field(ge=0, default=0)
+    received_by_name: str = ""
+    received_by_phone: str = ""
+    shortage_note: str = ""
+    operation_id: str | None = None
+
+
+# ---- credit notes (J)
+class CreditNoteIn(BaseModel):
+    invoice_id: int
+    amount_minor: int = Field(gt=0)
+    reason: str = Field(min_length=5)
+    operation_id: str | None = None
+
+
+class CreditNoteDecisionIn(BaseModel):
+    note: str = ""
+    operation_id: str | None = None

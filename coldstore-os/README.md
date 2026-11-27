@@ -4,7 +4,7 @@ Production-grade management platform for a large Controlled-Atmosphere (CA) appl
 
 **Deployment target:** Local facility server (authoritative) · Windows desktop office app (browser-based, served by the facility server) · Installable offline-capable Android PWA.
 
-**Status:** Milestone 0 (audit + architecture) complete. Milestone 1 (verified inventory + billing) implemented as a tested vertical slice. See `docs/READINESS-CHECKLIST.md` — this system is **not yet certified for production use**; remaining acceptance and commissioning gates are tracked there.
+**Status:** Milestone 0 (audit + architecture) complete. Milestone 1 (verified inventory + billing) implemented as a tested vertical slice. **Phase 2–3 (full lifecycle backend: contracts, pre-inward advices, quality/grading, barcodes, outward orders/picking/packing/deliveries, credit notes, new reports) and Phase 4 (operator UI for every workflow) are implemented and the entire 112-test suite is green** — see `docs/READINESS-CHECKLIST.md`. This system is **not yet certified for production use**; remaining acceptance and commissioning gates are tracked there.
 
 ---
 
@@ -55,8 +55,38 @@ chambers → masters → season → tariff → parties → opening stock (docs/O
 Run the test suite:
 
 ```bash
-cd coldstore-os/server && python -m pytest ../tests -q     # 76 tests
+cd coldstore-os/server && python -m pytest ../tests -q     # 112 tests
 ```
+
+## Phase 2–4 — full lifecycle (workflows A–L)
+
+The complete operating cycle is implemented end-to-end, backend and operator UI:
+
+| Workflow | Backend | UI (server/static/app.js) |
+|---|---|---|
+| A · Contracts & crate bookings | `/contracts` CRUD, activate/close (maker-checker), reconciliation, billing-period link | Contracts page + contract modal + "new contract" wizard with per-line expectations |
+| B · Pre-inward advices | `/inward/advices` CRUD, cancel/close, expected-vs-received reconciliation (auto-`arrived`) | Advices panel + reconcile modal; receipt form links to an open advice |
+| C · Inward (verified intake) | draft → verify (2nd user) → lot creation, chained supersession | Existing intake flow + advice picker |
+| D · Barcode / QR | `/barcodes/issues` (overlapping range refused), resolve, void, QR print sheets (segno) | Lot modal "issue labels" + scan tool (scanner-gun input + `BarcodeDetector` camera on Android) |
+| E · Quality inspection & grading | `/quality` checks master, inspections (verdict-only → apply posts audited movements; reject debits; downgrade = split-with-regrade), all-or-nothing CSV grading import with dry run, sha256 photo evidence | Quality page: inspections, criteria master, import tool, photo attach |
+| F · Chambers & occupancy | existing + `/reports/occupancy-history/{id}` ledger replay | Chambers page + occupancy history report |
+| G · Inventory ledger | movements, transfers, splits/merges, approved adjustments (unchanged) | unchanged |
+| H · Outward orders | `/orders` confirm (availability-validated), picks, packing → draft dispatch note; stock leaves **only at finalize** | Orders page + pick/pack modal + dispatch-from-order wizard |
+| I · Packing & delivery | `/deliveries` create/confirm (delivered+shortage+damage must equal planned)/cancel | Orders page deliveries panel + confirm modal |
+| J · Billing & accounting | invoices (contract-linked, tariff chain, snapshot rates), payments, statements + `/credit-notes` (maker-checker; only approved credits reduce outstanding) | Billing page + credit-note panel/actions |
+| K · Reports | inward/outward registers, daily summary, occupancy history, stock-by (owner/variety/grade/chamber), stock reconciliation, receivables | Reports page: single "operations registers" panel |
+| L · Audit & RBAC | every mutation audited; 10 scoped roles | admin audit viewer (unchanged) |
+
+**Roles (seeded by `seed_demo.py`):** admin, manager, contracts1, intake1/intake2,
+inspector1, invop1, billing1, dispatch1, auditor1 — passwords printed by the seed
+script; all demo accounts must change password at first login.
+
+**Evidence:** 112 automated tests green (`tests/` incl. contracts, quality,
+barcodes, orders, credit notes, new reports, expanded RBAC matrix) plus a live
+HTTP smoke run of the whole A→K chain (contract → advice → receipt → verify →
+advice reconciliation → barcode scan/print → quality reject+downgrade → order →
+pick → pack → dispatch → finalize → delivery → invoice + approved credit note →
+reports → 25-action audit trail).
 
 ## Phase-2 telemetry (monitoring-only) — with bench simulator
 

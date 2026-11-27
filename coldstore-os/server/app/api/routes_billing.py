@@ -11,11 +11,14 @@ from sqlalchemy.orm import Session
 from .. import idempotency as idem
 from ..audit import audit, snapshot
 from ..billing import engine as bill
+from ..billing.creditnotes import (approved_total_for_invoice, create_credit_note,
+                                   decide_credit_note, void_credit_note)
 from ..billing.engine import invoice_outstanding_minor, owner_credit_minor
 from ..db import get_db
-from ..models import (Invoice, InvoiceLine, Party, Payment, PaymentAllocation, Tariff,
-                      TariffLine, TaxConfig)
-from ..schemas import GenerateInvoiceIn, PaymentIn, TariffIn, TaxIn, VoidIn
+from ..models import (Contract, CreditNote, Invoice, InvoiceLine, Party, Payment,
+                      PaymentAllocation, Tariff, TariffLine, TaxConfig)
+from ..schemas import (CreditNoteDecisionIn, CreditNoteIn, GenerateInvoiceIn, PaymentIn,
+                       TariffIn, TaxIn, VoidIn)
 from .deps import require
 
 router = APIRouter(tags=["billing"])
@@ -23,7 +26,8 @@ router = APIRouter(tags=["billing"])
 
 # ------------------------------------------------------------------ tariffs
 @router.get("/tariffs")
-def list_tariffs(db: Session = Depends(get_db), user=Depends(require("billing.read"))):
+def list_tariffs(db: Session = Depends(get_db),
+                 user=Depends(require("billing.read", "tariffs.read"))):
     out = []
     for t in db.scalars(select(Tariff).order_by(Tariff.code, Tariff.version.desc())):
         out.append({"id": t.id, "code": t.code, "name": t.name, "version": t.version,
@@ -35,7 +39,7 @@ def list_tariffs(db: Session = Depends(get_db), user=Depends(require("billing.re
 
 @router.get("/tariffs/{tariff_id}")
 def get_tariff(tariff_id: int, db: Session = Depends(get_db),
-               user=Depends(require("billing.read"))):
+               user=Depends(require("billing.read", "tariffs.read"))):
     t = db.get(Tariff, tariff_id)
     if t is None:
         raise HTTPException(404, "tariff not found")
@@ -135,11 +139,30 @@ def generate_invoice(body: GenerateInvoiceIn, db: Session = Depends(get_db),
     owner = db.get(Party, body.owner_id)
     if owner is None:
         raise HTTPException(404, "owner not found")
+    contract = None
+    if body.contract_id is not None:
+        contract = db.get(Contract, body.contract_id)
+        if contract is None:
+            raise HTTPException(404, "contract not found")
+        if contract.owner_id != owner.id:
+            raise HTTPException(409, {"code": "ownership",
+                                      "detail": "contract belongs to a different owner"})
+        if contract.status != "active":
+            raise HTTPException(422, f"contract {contract.contract_no} is "
+                                     f"{contract.status} — billing requires an active contract")
+        if body.period_from < contract.valid_from or body.period_to > contract.valid_to:
+            raise HTTPException(422, f"period {body.period_from}..{body.period_to} is "
+                                     f"outside contract validity "
+                                     f"{contract.valid_from}..{contract.valid_to}")
     tariff = None
     if body.tariff_id:
         tariff = db.get(Tariff, body.tariff_id)
         if tariff is None or tariff.status != "active":
             raise HTTPException(422, "tariff not found or not active")
+    elif contract is not None and contract.tariff_id is not None:
+        tariff = db.get(Tariff, contract.tariff_id)
+        if tariff is None or tariff.status != "active":
+            raise HTTPException(422, "contract tariff not found or not active")
     else:  # owner's contract tariff else latest active generic
         tariff = db.scalar(select(Tariff).where(Tariff.owner_id == owner.id,
                                                 Tariff.status == "active")
@@ -162,6 +185,9 @@ def generate_invoice(body: GenerateInvoiceIn, db: Session = Depends(get_db),
                                 discount_minor=body.discount_minor, due_date=body.due_date,
                                 actor=user, operation_id=body.operation_id,
                                 now=datetime.utcnow())
+    if contract is not None:
+        inv.contract_id = contract.id
+        db.flush()
     resp = _inv_dump(db, inv)
     idem.finish(db, body.operation_id, user.id, "invoice.generate", 201, resp)
     return resp
@@ -176,6 +202,8 @@ def _inv_dump(db: Session, inv: Invoice):
             "total_minor": inv.total_minor, "tax_snapshot": inv.tax_snapshot,
             "due_date": str(inv.due_date) if inv.due_date else None,
             "outstanding_minor": invoice_outstanding_minor(db, inv.id),
+            "contract_id": inv.contract_id,
+            "credited_minor": approved_total_for_invoice(db, inv.id),
             "lines": [{"charge_code": l.charge_code, "description": l.description,
                        "lot_id": l.lot_id, "qty_kg": str(l.qty_kg) if l.qty_kg else None,
                        "units": l.units, "days": l.days,
@@ -381,8 +409,14 @@ def owner_statement(owner_id: int, from_date: date | None = None, to_date: date 
                  "amount_minor": p.amount_minor, "method": p.method,
                  "reference": p.reference}
                 for p in db.scalars(pay_q.order_by(Payment.received_at, Payment.id))]
+    credits = db.scalars(select(CreditNote).where(
+        CreditNote.owner_id == owner.id,
+        CreditNote.status.in_(["approved", "void"])).order_by(CreditNote.id)).all()
     return {"owner": {"id": owner.id, "code": owner.code, "name": owner.name},
             "invoices": invoices, "payments": payments,
+            "credit_notes": [{"credit_no": c.credit_no, "status": c.status,
+                              "amount_minor": c.amount_minor, "reason": c.reason}
+                             for c in credits],
             "total_outstanding_minor": total_due,
             "credit_minor": owner_credit_minor(db, owner.id),
             "net_due_minor": max(0, total_due - owner_credit_minor(db, owner.id)),
@@ -398,3 +432,115 @@ def owner_statement_print(owner_id: int, db: Session = Depends(get_db),
         raise HTTPException(404, "owner not found")
     st = owner_statement(owner_id, db=db, user=user)
     return HTMLResponse(statement_html(st))
+
+
+# ---------------------------------------------------------------- credit notes (J)
+def _cn_dump(cn: CreditNote) -> dict:
+    return {"id": cn.id, "credit_no": cn.credit_no, "invoice_id": cn.invoice_id,
+            "owner_id": cn.owner_id, "amount_minor": cn.amount_minor,
+            "reason": cn.reason, "status": cn.status, "created_by": cn.created_by,
+            "created_at": str(cn.created_at), "approved_by": cn.approved_by,
+            "approved_at": str(cn.approved_at) if cn.approved_at else None,
+            "approved_note": cn.approved_note, "void_reason": cn.void_reason}
+
+
+@router.get("/credit-notes")
+def list_credit_notes(invoice_id: int | None = None, status: str | None = None,
+                      db: Session = Depends(get_db),
+                      user=Depends(require("billing.read"))):
+    q = select(CreditNote).order_by(CreditNote.id.desc()).limit(500)
+    if invoice_id:
+        q = q.where(CreditNote.invoice_id == invoice_id)
+    if status:
+        q = q.where(CreditNote.status == status)
+    return [_cn_dump(c) for c in db.scalars(q)]
+
+
+@router.post("/credit-notes", status_code=201)
+def create_credit(body: CreditNoteIn, db: Session = Depends(get_db),
+                  user=Depends(require("billing.write"))):
+    idem.begin(db, body.operation_id, user.id, "creditnote.create")
+    try:
+        cn = create_credit_note(db, invoice_id=body.invoice_id,
+                                amount_minor=body.amount_minor, reason=body.reason,
+                                actor=user, operation_id=body.operation_id,
+                                now=datetime.utcnow())
+    except Exception as e:
+        from ..domain.inventory import DomainError
+        if isinstance(e, DomainError):
+            raise HTTPException(409 if e.code != "not_found" else 404,
+                                {"code": e.code, "detail": e.detail})
+        raise
+    resp = _cn_dump(cn)
+    idem.finish(db, body.operation_id, user.id, "creditnote.create", 201, resp)
+    return resp
+
+
+@router.post("/credit-notes/{cn_id}/approve")
+def approve_credit(cn_id: int, body: CreditNoteDecisionIn, db: Session = Depends(get_db),
+                   user=Depends(require("billing.approve"))):
+    idem.begin(db, body.operation_id, user.id, "creditnote.approve")
+    cn = db.get(CreditNote, cn_id)
+    if cn is None:
+        raise HTTPException(404, "credit note not found")
+    try:
+        decide_credit_note(db, cn=cn, approve=True, note=body.note, actor=user,
+                           operation_id=body.operation_id, now=datetime.utcnow())
+    except Exception as e:
+        from ..domain.inventory import DomainError
+        if isinstance(e, DomainError):
+            raise HTTPException(403 if e.code == "forbidden" else 409,
+                                {"code": e.code, "detail": e.detail})
+        raise
+    resp = _cn_dump(cn)
+    idem.finish(db, body.operation_id, user.id, "creditnote.approve", 200, resp)
+    return resp
+
+
+@router.post("/credit-notes/{cn_id}/reject")
+def reject_credit(cn_id: int, body: CreditNoteDecisionIn, db: Session = Depends(get_db),
+                  user=Depends(require("billing.approve"))):
+    idem.begin(db, body.operation_id, user.id, "creditnote.reject")
+    cn = db.get(CreditNote, cn_id)
+    if cn is None:
+        raise HTTPException(404, "credit note not found")
+    try:
+        decide_credit_note(db, cn=cn, approve=False, note=body.note, actor=user,
+                           operation_id=body.operation_id, now=datetime.utcnow())
+    except Exception as e:
+        from ..domain.inventory import DomainError
+        if isinstance(e, DomainError):
+            raise HTTPException(409, {"code": e.code, "detail": e.detail})
+        raise
+    resp = _cn_dump(cn)
+    idem.finish(db, body.operation_id, user.id, "creditnote.reject", 200, resp)
+    return resp
+
+
+@router.post("/credit-notes/{cn_id}/void")
+def void_credit(cn_id: int, body: VoidIn, db: Session = Depends(get_db),
+                user=Depends(require("billing.approve"))):
+    idem.begin(db, body.operation_id, user.id, "creditnote.void")
+    cn = db.get(CreditNote, cn_id)
+    if cn is None:
+        raise HTTPException(404, "credit note not found")
+    try:
+        void_credit_note(db, cn=cn, reason=body.reason, actor=user,
+                         operation_id=body.operation_id)
+    except Exception as e:
+        from ..domain.inventory import DomainError
+        if isinstance(e, DomainError):
+            raise HTTPException(403 if e.code == "forbidden" else 409,
+                                {"code": e.code, "detail": e.detail})
+        raise
+    resp = _cn_dump(cn)
+    idem.finish(db, body.operation_id, user.id, "creditnote.void", 200, resp)
+    return resp
+
+
+@router.get("/owners/{owner_id}/credit-notes")
+def owner_credit_notes(owner_id: int, db: Session = Depends(get_db),
+                       user=Depends(require("billing.read"))):
+    rows = db.scalars(select(CreditNote).where(CreditNote.owner_id == owner_id)
+                      .order_by(CreditNote.id.desc())).all()
+    return [_cn_dump(c) for c in rows]

@@ -144,6 +144,16 @@ async function submitOp(endpoint, body, label) {
   }
 }
 
+async function runOp(endpoint, body, okMsg, opts = {}) {
+  /* submitOp + queued/replay toasts; renders on completion (opts.render=false to skip). Returns response body or null when queued. */
+  const r = await submitOp(endpoint, body);
+  if (r.queued) { toast('Saved offline — will sync automatically when back online', 'warn'); if (opts.render !== false) render(); return null; }
+  const msg = typeof okMsg === 'function' ? okMsg(r.data) : okMsg;
+  toast(r.replay ? `${msg} (idempotent replay — already applied)` : msg, 'ok');
+  if (opts.render !== false) render();
+  return r.data;
+}
+
 let syncing = false;
 async function syncOutbox() {
   if (syncing || !state.token) return;
@@ -225,9 +235,12 @@ const sel = (name, rows, val, label, cur) =>
 /* ---------------- chrome ---------------- */
 const NAV = [
   ['dashboard', 'Dashboard', 'M3 13h8V3H3v10Zm0 8h8v-6H3v6Zm10 0h8V11h-8v10Zm0-18v6h8V3h-8Z'],
+  ['contracts', 'Contracts', 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Zm-1 2 4.5 4.5H13V4ZM8 13h8v1.5H8V13Zm0 4h8V18H8v-1Z'],
   ['intake', 'Intake', 'M12 2 2 7l10 5 10-5-10-5ZM2 17l10 5 10-5'],
+  ['quality', 'Quality', 'M12 2 2 7l10 5 10-5-10-5ZM2 17l10 5 10-5M2 12l10 5 10-5'],
   ['lots', 'Lots & Trace', 'M20 7H4a2 2 0 0 0-2 2v10h20V9a2 2 0 0 0-2-2ZM2 7l3-4h14l3 4'],
   ['chambers', 'Chambers', 'M4 21V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v16M2 21h20M9 7h1m4 0h1M9 11h1m4 0h1M9 15h1m4 0h1'],
+  ['orders', 'Orders', 'M4 4h16l-1 9H7L4 4ZM4 4 3 1H1m7 20a1 1 0 1 0 0-2 1 1 0 0 0 0 2Zm10 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z'],
   ['dispatch', 'Dispatch', 'M1 3h15v13H1zM16 8h4l3 3v5h-7M5.5 21a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm13 0a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z'],
   ['billing', 'Billing', 'M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6'],
   ['telemetry', 'CA Telemetry', 'M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0Z'],
@@ -237,7 +250,10 @@ const NAV = [
 
 function shell(content) {
   const nav = NAV.filter(([k]) => (k !== 'admin' || can('users.read') || can('backups.manage') || can('audit.read'))
-    && (k !== 'telemetry' || can('telemetry.read')))
+    && (k !== 'telemetry' || can('telemetry.read'))
+    && (k !== 'contracts' || can('contracts.read') || can('inward.read'))
+    && (k !== 'quality' || can('quality.read'))
+    && (k !== 'orders' || can('orders.read') || can('deliveries.read')))
     .map(([k, label, d]) => `<a href="#/${k}" class="${state.route === k ? 'active' : ''}">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="${d}"/></svg><span>${label}</span></a>`).join('');
   return `
@@ -338,6 +354,7 @@ function newReceiptModal() {
   const owners = m.parties.filter((p) => p.roles.includes('owner'));
   const growers = m.parties.filter((p) => p.roles.includes('grower'));
   const o = modal('New intake receipt', `<form id="rform"><div class="frm-grid">
+    <div><label class="f">Pre-inward advice</label><select name="advice_id" id="r-adv"><option value="">— walk-in (no advice) —</option></select></div>
     <div><label class="f">Season</label>${sel('season_id', m.seasons, 'id', 'name')}</div>
     <div><label class="f">Owner *</label><select name="owner_id" required>${opt(owners, 'id', 'name')}</select></div>
     <div><label class="f">Grower</label><select name="grower_id"><option value="">—</option>${opt(growers, 'id', 'name')}</select></div>
@@ -353,6 +370,20 @@ function newReceiptModal() {
     <div><label class="f">Condition notes</label><input name="condition_notes"></div>
   </div><div class="note">Net = gross − tare. The receipt is a <b>draft</b> until a second operator verifies it (maker/checker). Saved offline-safe.</div>
   <div class="actions"><button class="btn">Save draft</button></div></form>`);
+  if (can('inward.read')) {
+    get('/inward/advices?status=open').then((ads) => {
+      const s = o.querySelector('#r-adv');
+      s.innerHTML += ads.map((a) => `<option value="${a.id}" data-owner="${a.owner_id}" data-variety="${a.variety_id}" data-grade="${a.grade_id ?? ''}" data-kg="${a.expected_kg}" data-units="${a.expected_units}" data-vehicle="${esc(a.vehicle_no)}">${esc(a.advice_no)} · ${esc(partyName(a.owner_id))} · exp ${kg(a.expected_kg)}</option>`).join('');
+      s.onchange = () => {
+        const optEl = s.selectedOptions[0];
+        if (!optEl || !optEl.dataset.owner) return;
+        o.querySelector('[name="owner_id"]').value = optEl.dataset.owner;
+        o.querySelector('[name="variety_id"]').value = optEl.dataset.variety;
+        if (optEl.dataset.grade) o.querySelector('[name="grade_id"]').value = optEl.dataset.grade;
+        o.querySelector('[name="vehicle_no"]').value = optEl.dataset.vehicle || '';
+      };
+    }).catch(() => {});
+  }
   o.querySelector('#rform').onsubmit = async (ev) => {
     ev.preventDefault();
     const v = formVals(ev.target);
@@ -362,6 +393,7 @@ function newReceiptModal() {
       variety_id: +v.variety_id, grade_id: +v.grade_id, harvest_year: +v.harvest_year,
       packaging_id: +v.packaging_id, unit_count: +v.unit_count,
       gross_kg: +v.gross_kg, tare_kg: +v.tare_kg, condition_notes: v.condition_notes || '',
+      advice_id: intOr(v.advice_id) || null,
     };
     try {
       const r = await submitOp('/intake/receipts', body, `receipt ${v.vehicle_no || ''}`);
@@ -389,9 +421,9 @@ function verifyModal(rid) {
     ev.preventDefault();
     const v = formVals(ev.target);
     try {
-      const r = await post(`/intake/receipts/${rid}/verify`, { chamber_id: intOr(v.chamber_id) || null, reason: v.reason || '', operation_id: uuid() });
-      toast(`Lot ${r.data.lot_no} created`, 'ok');
-      o.remove(); loadMasters().then(render);
+      const d = await runOp(`/intake/receipts/${rid}/verify`, { chamber_id: intOr(v.chamber_id) || null, reason: v.reason || '' },
+        (d) => `Lot ${d.lot_no} created`);
+      if (d) o.remove(); loadMasters();
     } catch (e) { errToast(e); }
   };
 }
@@ -472,24 +504,29 @@ async function lotModal(lotId) {
       ${l.unallocated_kg > 0 ? '<button class="btn ghost" id="m-alloc">Allocate to chamber</button>' : ''}
       <button class="btn ghost" id="m-transfer">Transfer</button>
       <button class="btn ghost" id="m-split">Split</button><button class="btn ghost" id="m-merge">Merge</button>
-      <button class="btn ghost danger" id="m-adj">Report discrepancy</button></div>` : ''}`);
+      <button class="btn ghost danger" id="m-adj">Report discrepancy</button></div>` : ''}
+    ${can('barcodes.issue') ? `<div class="actions">
+      <button class="btn ghost" id="m-barcode">🏷 Issue/print labels</button></div>` : ''}
+    ${can('barcodes.read') ? `<div class="actions"><button class="btn ghost" id="m-scan">📷 Scan a label</button></div>` : ''}`);
 
   const wire = (id, fn) => { const b = o.querySelector(id); if (b) b.onclick = fn; };
   wire('#m-alloc', () => movementModal(o, `Allocate lot ${l.lot_no}`, async (v, done) => {
-    await post(`/lots/${l.id}/allocate`, { chamber_id: +v.chamber_id, package_id: +v.package_id, qty_kg: +v.qty_kg, unit_count: +v.unit_count || 0, reason: v.reason || '', operation_id: uuid() }); done();
+    await runOp(`/lots/${l.id}/allocate`, { chamber_id: +v.chamber_id, package_id: +v.package_id, qty_kg: +v.qty_kg, unit_count: +v.unit_count || 0, reason: v.reason || '' }, 'Allocation posted'); done();
   }, { max: l.unallocated_kg, chambers: true, pkg: true }));
   wire('#m-transfer', () => movementModal(o, `Transfer lot ${l.lot_no}`, async (v, done) => {
-    await post(`/lots/${l.id}/transfer`, { from_chamber_id: +v.from_chamber_id, to_chamber_id: +v.to_chamber_id, package_id: +v.package_id, qty_kg: +v.qty_kg, unit_count: +v.unit_count || 0, reason: v.reason || '', operation_id: uuid() }); done();
+    await runOp(`/lots/${l.id}/transfer`, { from_chamber_id: +v.from_chamber_id, to_chamber_id: +v.to_chamber_id, package_id: +v.package_id, qty_kg: +v.qty_kg, unit_count: +v.unit_count || 0, reason: v.reason || '' }, 'Transfer posted'); done();
   }, { transfer: l.balances }));
   wire('#m-split', () => movementModal(o, `Split lot ${l.lot_no} (child keeps parentage)`, async (v, done) => {
-    const r = await post('/lots/split', { source_lot_id: l.id, chamber_id: +v.chamber_id, package_id: +v.package_id, qty_kg: +v.qty_kg, unit_count: +v.unit_count || 0, reason: v.reason || 'split', operation_id: uuid() });
-    toast(`Child lot ${r.data.child_lot_no} created`, 'ok'); done();
+    await runOp('/lots/split', { source_lot_id: l.id, chamber_id: +v.chamber_id, package_id: +v.package_id, qty_kg: +v.qty_kg, unit_count: +v.unit_count || 0, reason: v.reason || 'split' },
+      (d) => `Child lot ${d.child_lot_no} created`); done();
   }, { fromLot: l }));
   wire('#m-merge', () => mergeModal(o, l));
   wire('#m-adj', () => movementModal(o, `Report discrepancy on lot ${l.lot_no}`, async (v, done) => {
-    await post('/adjustments', { direction: v.direction, lot_id: l.id, chamber_id: +v.chamber_id, package_id: +v.package_id, qty_kg: +v.qty_kg, reason: v.reason, operation_id: uuid() });
-    toast('Adjustment recorded — pending manager approval (maker/checker)', 'ok'); done();
+    await runOp('/adjustments', { direction: v.direction, lot_id: l.id, chamber_id: +v.chamber_id, package_id: +v.package_id, qty_kg: +v.qty_kg, reason: v.reason },
+      'Adjustment recorded — pending manager approval (maker/checker)'); done();
   }, { adj: l }));
+  wire('#m-barcode', () => barcodeIssueModal(l.id, l.lot_no, l.stored_units));
+  wire('#m-scan', () => scanModal());
 }
 
 async function refreshAll() { await loadMasters(); render(); }
@@ -534,12 +571,11 @@ function mergeModal(parent, lot) {
     ev.preventDefault();
     const v = formVals(ev.target);
     try {
-      const r = await post('/lots/merge', {
+      const d = await runOp('/lots/merge', {
         sources: [{ lot_id: lot.id, qty_kg: +v.q1, unit_count: 0 }, { lot_id: +v.lot2, qty_kg: +v.q2, unit_count: 0 }],
-        chamber_id: +v.chamber_id, package_id: +v.package_id, reason: v.reason, operation_id: uuid(),
-      });
-      toast(`Merged into ${r.data.merged_lot_no}`, 'ok');
-      o2.remove(); parent.remove(); refreshAll();
+        chamber_id: +v.chamber_id, package_id: +v.package_id, reason: v.reason,
+      }, (d) => `Merged into ${d.merged_lot_no}`);
+      if (d) { o2.remove(); parent.remove(); loadMasters(); }
     } catch (e) { errToast(e); }
   };
 }
@@ -650,8 +686,9 @@ async function newDispatchModal() {
 
 /* ================= BILLING ================= */
 async function viewBilling() {
-  const [invoices, tariffs, taxes] = await Promise.all(
-    [get('/invoices'), get('/tariffs'), get('/taxes')]);
+  const [invoices, tariffs, taxes, credits] = await Promise.all(
+    [get('/invoices'), get('/tariffs'), get('/taxes'),
+     can('billing.read') ? get('/credit-notes') : Promise.resolve([])]);
   const invRows = invoices.map((i) => `<tr>
     <td><b>${esc(i.invoice_no)}</b></td><td>${esc(partyName(i.owner_id))}</td>
     <td class="mini">${i.period_from} → ${i.period_to}</td>
@@ -659,6 +696,7 @@ async function viewBilling() {
     <td class="num"><b>${money(i.total_minor)}</b></td><td class="num">${money(i.outstanding_minor)}</td>
     <td><span class="badge ${i.status}">${i.status}</span><div class="mini">tariff v${i.tariff_version}</div></td>
     <td>${i.status === 'draft' && can('billing.write') ? `<button class="btn small" data-finv="${i.id}">Finalize</button>` : ''}
+      ${i.status === 'finalized' && can('billing.write') ? `<button class="btn small ghost" data-credit="${i.id}">Credit</button>` : ''}
       ${i.status !== 'void' && can('billing.void') ? `<button class="btn small ghost danger" data-vinv="${i.id}">Void</button>` : ''}
       <button class="btn small ghost" data-print="/invoices/${i.id}/print">Print</button></td></tr>`).join('');
   const tarRows = tariffs.map((t) => `<tr><td>${esc(t.code)} v${t.version}</td><td>${esc(t.name)}</td>
@@ -674,7 +712,38 @@ async function viewBilling() {
     <table class="tbl"><thead><tr><th>No</th><th>Owner</th><th>Period</th><th class="num">Subtotal</th><th class="num">Tax</th><th class="num">Total</th><th class="num">Outstanding</th><th>Status</th><th></th></tr></thead>
     <tbody>${invRows || '<tr><td colspan="9" class="note">no invoices</td></tr>'}</tbody></table></div></div>
   <div class="panel"><h2>Tariffs (versioned)</h2><div class="body">
-    <table class="tbl"><thead><tr><th>Code</th><th>Name</th><th>Status</th><th>Scope</th><th></th></tr></thead><tbody>${tarRows}</tbody></table></div></div>`;
+    <table class="tbl"><thead><tr><th>Code</th><th>Name</th><th>Status</th><th>Scope</th><th></th></tr></thead><tbody>${tarRows}</tbody></table></div></div>
+  ${can('billing.read') ? `<div class="panel"><h2>Credit notes (maker/checker; approved credits reduce outstanding)</h2><div class="body">
+    <table class="tbl"><thead><tr><th>No</th><th>Invoice</th><th class="num">Amount</th><th>Reason</th><th>Status</th><th></th></tr></thead>
+    <tbody>${creditRows(credits) || '<tr><td colspan="6" class="note">no credit notes</td></tr>'}</tbody></table></div></div>` : ''}`;
+}
+
+function creditRows(credits) {
+  return credits.slice(0, 20).map((c) => `<tr>
+    <td><b>${esc(c.credit_no)}</b></td><td>${esc((c.invoice_id || '').toString())}</td>
+    <td class="num">${money(c.amount_minor)}</td><td class="mini">${esc(c.reason)}</td>
+    <td><span class="badge ${c.status}">${c.status}</span></td>
+    <td>${c.status === 'draft' && can('billing.approve') ? `<button class="btn small" data-cnap="${c.id}">Approve</button>
+      <button class="btn small ghost danger" data-cnrj="${c.id}">Reject</button>` : ''}
+      ${(c.status === 'draft' || c.status === 'approved') && can('billing.approve') ? `<button class="btn small ghost danger" data-cnvd="${c.id}">Void</button>` : ''}</td></tr>`).join('');
+}
+
+function creditNoteModal(invoiceId) {
+  const o = modal('New credit note (draft — manager approves)', `<form id="cnf" class="frm-grid">
+    <div><label class="f">Amount ₹</label><input name="amount" type="number" step="0.01" min="0.01" required></div>
+    <div><label class="f">Reason (min 5 chars)</label><input name="reason" required minlength="5"></div>
+    <div class="actions"><button class="btn">Save draft</button></div></form>
+    <div class="note">Only an APPROVED credit note reduces the invoice outstanding. The invoice itself is never edited.</div>`);
+  o.querySelector('#cnf').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const v = formVals(ev.target);
+    try {
+      const d = await runOp('/credit-notes', { invoice_id: invoiceId,
+        amount_minor: Math.round(+v.amount * 100), reason: v.reason },
+        (d) => `Credit note ${d.credit_no} saved — awaiting approval`);
+      if (d) o.remove();
+    } catch (e) { errToast(e); }
+  };
 }
 
 function genInvoiceModal() {
@@ -691,13 +760,12 @@ function genInvoiceModal() {
     ev.preventDefault();
     const v = formVals(ev.target);
     try {
-      const r = await post('/invoices/generate', {
+      const d = await runOp('/invoices/generate', {
         owner_id: +v.owner_id, period_from: v.period_from, period_to: v.period_to,
         discount_minor: Math.round((+v.discount || 0) * 100),
-        due_date: v.due_date || null, operation_id: uuid(),
-      });
-      toast(`Draft invoice ${r.data.invoice_no}: ${money(r.data.total_minor)}`, 'ok');
-      o.remove(); render();
+        due_date: v.due_date || null,
+      }, (d) => `Draft invoice ${d.invoice_no}: ${money(d.total_minor)}`);
+      if (d) o.remove();
     } catch (e) { errToast(e); }
   };
 }
@@ -961,7 +1029,103 @@ async function viewReports() {
     <div id="srout"></div></div></div>
   ${receivables ? `<div class="panel"><h2>Receivables by owner</h2><div class="body">
     <table class="tbl"><thead><tr><th>Owner</th><th class="num">Outstanding</th><th class="num">Overdue</th><th class="num">Credit</th></tr></thead>
-    <tbody>${recRows || '<tr><td colspan="4" class="note">no open receivables</td></tr>'}</tbody></table></div></div>` : ''}`;
+    <tbody>${recRows || '<tr><td colspan="4" class="note">no open receivables</td></tr>'}</tbody></table></div></div>` : ''}
+  <div class="panel"><h2>Operations registers & summaries (workflow K)</h2><div class="body">
+    <form id="orf" class="frm-grid" style="max-width:640px">
+      <div><label class="f">Report</label><select name="kind">
+        <option value="inward">Inward register (verified receipts)</option>
+        <option value="outward">Outward register (finalized dispatches)</option>
+        <option value="daily">Daily operations summary</option>
+        <option value="occupancy">Chamber occupancy history</option>
+        <option value="stockby">Stock by owner / variety / grade / chamber</option>
+      </select></div>
+      <div><label class="f">From / Day</label><input type="date" name="from_date" required></div>
+      <div id="orf-to"><label class="f">To</label><input type="date" name="to_date"></div>
+      <div id="orf-ch" style="display:none"><label class="f">Chamber</label><select name="chamber_id">${opt(M().chambers, 'id', 'code')}</select></div>
+      <div id="orf-by" style="display:none"><label class="f">Group by</label><select name="by">
+        <option value="owner">Owner</option><option value="variety">Variety</option>
+        <option value="grade">Grade</option><option value="chamber">Chamber</option></select></div>
+      <div style="display:flex;align-items:end"><button class="btn small">Run</button></div></form>
+    <div id="orout"></div></div></div>`;
+}
+
+function renderInwardReport(r) {
+  const rows = r.receipts.map((x) => `<tr><td><b>${esc(x.receipt_no)}</b></td>
+    <td class="mini">${esc(x.received_at.slice(0, 16).replace('T', ' '))}</td><td>${esc(x.owner)}</td>
+    <td>${esc(x.variety)}</td><td class="num">${kg(x.net_kg)}</td><td class="num">${nf(x.units)}</td>
+    <td>${esc(x.vehicle_no || '')}</td><td>${x.lot_no ? `<a href="#/lots" class="link">${esc(x.lot_no)}</a>` : '—'}</td>
+    <td class="mini">${esc(x.advice_no || 'walk-in')}</td></tr>`).join('');
+  return `<div class="cards" style="margin-top:12px">
+    <div class="card ok"><div class="k">Receipts</div><div class="v">${nf(r.count)}</div></div>
+    <div class="card"><div class="k">Total net</div><div class="v">${kg(r.total_net_kg)}</div></div></div>
+  <table class="tbl" style="margin-top:10px"><thead><tr><th>Receipt</th><th>When</th><th>Owner</th><th>Variety</th>
+    <th class="num">Net kg</th><th class="num">Units</th><th>Vehicle</th><th>Lot</th><th>Advice</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="9" class="note">no verified receipts in window</td></tr>'}</tbody></table>`;
+}
+
+function renderOutwardReport(r) {
+  const rows = r.dispatches.map((x) => `<tr><td><b>${esc(x.dispatch_no)}</b></td>
+    <td class="mini">${esc(x.dispatched_at.slice(0, 16).replace('T', ' '))}</td><td>${esc(x.owner)}</td>
+    <td class="num">${kg(x.kg)}</td><td class="num">${nf(x.units)}</td><td>${esc(x.vehicle_no || '')}</td>
+    <td>${esc(x.destination || '')}</td><td><span class="badge ${x.status}">${x.status}</span></td>
+    <td class="mini">${x.order_id ? 'from order #' + x.order_id : 'direct'}</td></tr>`).join('');
+  return `<div class="cards" style="margin-top:12px">
+    <div class="card"><div class="k">Dispatch notes</div><div class="v">${nf(r.count)}</div></div>
+    <div class="card ok"><div class="k">Finalized</div><div class="v">${kg(r.total_finalized_kg)} · ${nf(r.total_finalized_units)} units</div></div></div>
+  <table class="tbl" style="margin-top:10px"><thead><tr><th>Dispatch</th><th>When</th><th>Owner</th>
+    <th class="num">kg</th><th class="num">Units</th><th>Vehicle</th><th>Destination</th><th>Status</th><th>Order</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="9" class="note">no dispatches in window</td></tr>'}</tbody></table>`;
+}
+
+function renderDailyReport(r) {
+  return `<div class="cards" style="margin-top:12px">
+    <div class="card ok"><div class="k">Intake</div><div class="v">${r.intake.receipts} rcpt · ${kg(r.intake.net_kg)}</div></div>
+    <div class="card"><div class="k">Outward finalized</div><div class="v">${kg(r.outward.finalized_kg)} / ${r.outward.dispatches} notes</div></div>
+    <div class="card"><div class="k">Collections</div><div class="v">${money(r.collections_minor)}</div></div>
+    <div class="card"><div class="k">Quality</div><div class="v">${r.quality.inspections} insp · rej ${kg(r.quality.rejected_kg)} · dngr ${kg(r.quality.downgraded_kg)}</div></div></div>
+  ${r.deliveries.length ? `<h3 style="margin-top:10px">Deliveries</h3><table class="tbl"><tbody>
+    ${r.deliveries.map((d) => `<tr><td><b>${esc(d.delivery_no)}</b></td><td><span class="badge ${d.status}">${d.status}</span></td><td class="num">planned ${kg(d.planned_kg)}</td></tr>`).join('')}
+  </tbody></table>` : ''}
+  ${r.adjustments.length ? `<h3 style="margin-top:10px">Adjustments</h3><table class="tbl"><tbody>
+    ${r.adjustments.map((a) => `<tr><td><b>${esc(a.adj_no)}</b></td><td>${esc(a.direction)}</td><td class="num">${kg(a.qty_kg)}</td><td><span class="badge ${a.status}">${a.status}</span></td></tr>`).join('')}
+  </tbody></table>` : ''}`;
+}
+
+function renderOccupancyReport(r) {
+  const max = Math.max(...r.days.map((d) => d.qty_kg), 1);
+  const rows = r.days.map((d) => `<tr><td>${esc(d.day)}</td><td class="num">${kg(d.qty_kg)}</td>
+    <td class="num">${d.occupancy_pct}%</td>
+    <td style="width:40%"><div style="height:10px;background:var(--ok,#3a9);width:${(100 * d.qty_kg / max).toFixed(1)}%;border-radius:5px"></div></td></tr>`).join('');
+  return `<h3 style="margin-top:12px">Chamber ${esc(r.chamber)} — capacity ${kg(r.capacity_kg)}</h3>
+  <table class="tbl"><thead><tr><th>Day</th><th class="num">Stored</th><th class="num">Occupancy</th><th></th></tr></thead>
+  <tbody>${rows}</tbody></table>`;
+}
+
+function renderStockByReport(rows) {
+  return `<table class="tbl" style="margin-top:12px"><thead><tr><th>Code</th><th>Name</th>
+    <th class="num">Stored kg</th><th class="num">Units</th></tr></thead><tbody>
+    ${rows.map((x) => `<tr><td><b>${esc(x.code)}</b></td><td>${esc(x.name)}</td>
+      <td class="num">${kg(x.qty_kg)}</td><td class="num">${nf(x.units)}</td></tr>`).join('')
+      || '<tr><td colspan="4" class="note">no stock</td></tr>'}</tbody></table>`;
+}
+
+async function runOpsReport(ev) {
+  ev.preventDefault();
+  const f = ev.target, v = formVals(f);
+  const kind = v.kind;
+  try {
+    if (kind === 'inward' || kind === 'outward') {
+      const r = await get(`/reports/${kind}?from_date=${v.from_date}&to_date=${v.to_date || v.from_date}`);
+      $('#orout').innerHTML = kind === 'inward' ? renderInwardReport(r) : renderOutwardReport(r);
+    } else if (kind === 'daily') {
+      $('#orout').innerHTML = renderDailyReport(await get(`/reports/daily?day=${v.from_date}`));
+    } else if (kind === 'occupancy') {
+      const to = v.to_date || v.from_date;
+      $('#orout').innerHTML = renderOccupancyReport(await get(`/reports/occupancy-history/${v.chamber_id}?from_date=${v.from_date}&to_date=${to}`));
+    } else {
+      $('#orout').innerHTML = renderStockByReport(await get(`/reports/stock-by?by=${v.by || 'owner'}`));
+    }
+  } catch (e) { errToast(e); }
 }
 
 async function runStockReport(ev) {
@@ -1021,7 +1185,7 @@ function newUserModal() {
 }
 
 /* ---------------- router & event wiring ---------------- */
-const VIEWS = { dashboard: viewDashboard, intake: viewIntake, lots: viewLots, chambers: viewChambers, dispatch: viewDispatch, billing: viewBilling, telemetry: viewTelemetry, reports: viewReports, admin: viewAdmin };
+const VIEWS = { dashboard: viewDashboard, contracts: viewContracts, intake: viewIntake, quality: viewQuality, lots: viewLots, chambers: viewChambers, orders: viewOrders, dispatch: viewDispatch, billing: viewBilling, telemetry: viewTelemetry, reports: viewReports, admin: viewAdmin };
 
 async function render() {
   state.route = location.hash.slice(2) || 'dashboard';
@@ -1109,7 +1273,7 @@ function wire() {
   document.querySelectorAll('[data-correct]').forEach((b) => b.onclick = async () => {
     const reason = prompt('Correction reason (original receipt is preserved as superseded):');
     if (!reason || reason.length < 3) return;
-    try { await post(`/intake/receipts/${b.dataset.correct}/correct`, { reason, operation_id: uuid() }); toast('Correction recorded', 'ok'); render(); } catch (e) { errToast(e); }
+    try { await runOp(`/intake/receipts/${b.dataset.correct}/correct`, {  reason, }); toast('Correction recorded', 'ok'); } catch (e) { errToast(e); }
   });
   $('#newrcpt')?.addEventListener('click', newReceiptModal);
   $('#isearch')?.addEventListener('click', render);
@@ -1119,21 +1283,21 @@ function wire() {
   document.querySelectorAll('[data-ch]').forEach((el) => el.onclick = () => chamberModal(+el.dataset.ch));
   document.querySelectorAll('[data-approve]').forEach((b) => b.onclick = async () => {
     const note = prompt('Approval note:') || '';
-    try { await post(`/adjustments/${b.dataset.approve}/approve`, { note, operation_id: uuid() }); toast('Approved & applied to stock', 'ok'); refreshAll(); } catch (e) { errToast(e); }
+    try { await runOp(`/adjustments/${b.dataset.approve}/approve`, { note }, 'Approved & applied to stock'); loadMasters(); } catch (e) { errToast(e); }
   });
   document.querySelectorAll('[data-reject]').forEach((b) => b.onclick = async () => {
     const note = prompt('Rejection reason:') || '';
-    try { await post(`/adjustments/${b.dataset.reject}/reject`, { note, operation_id: uuid() }); toast('Rejected', 'ok'); render(); } catch (e) { errToast(e); }
+    try { await runOp(`/adjustments/${b.dataset.reject}/reject`, {  note, }); toast('Rejected', 'ok'); } catch (e) { errToast(e); }
   });
   $('#newdsp')?.addEventListener('click', newDispatchModal);
   document.querySelectorAll('[data-fin]').forEach((b) => b.onclick = async () => {
     if (!confirm('Finalize dispatch? Stock leaves verified inventory now.')) return;
-    try { await post(`/dispatch/${b.dataset.fin}/finalize`, { operation_id: uuid() }); toast('Dispatch finalized', 'ok'); loadMasters().then(render); } catch (e) { errToast(e); }
+    try { await runOp(`/dispatch/${b.dataset.fin}/finalize`, {}, 'Dispatch finalized — stock deducted'); loadMasters(); } catch (e) { errToast(e); }
   });
   document.querySelectorAll('[data-void]').forEach((b) => b.onclick = async () => {
     const reason = prompt('Void reason (required, audited):');
     if (!reason || reason.length < 3) return;
-    try { await post(`/dispatch/${b.dataset.void}/void`, { reason, operation_id: uuid() }); toast('Voided — stock restored with audit trail', 'ok'); loadMasters().then(render); } catch (e) { errToast(e); }
+    try { await runOp(`/dispatch/${b.dataset.void}/void`, { reason }, 'Voided — stock restored with audit trail'); loadMasters(); } catch (e) { errToast(e); }
   });
   $('#geninv')?.addEventListener('click', genInvoiceModal);
   $('#newtar')?.addEventListener('click', newTariffModal);
@@ -1144,14 +1308,99 @@ function wire() {
   });
   document.querySelectorAll('[data-finv]').forEach((b) => b.onclick = async () => {
     if (!confirm('Finalize invoice? It becomes a legal receivable and cannot be edited.')) return;
-    try { const r = await post(`/invoices/${b.dataset.finv}/finalize`, { operation_id: uuid() }); toast(`Invoice ${r.data.invoice_no} finalized`, 'ok'); render(); } catch (e) { errToast(e); }
+    try { await runOp(`/invoices/${b.dataset.finv}/finalize`, {}, (d) => `Invoice ${d.invoice_no} finalized`); } catch (e) { errToast(e); }
   });
   document.querySelectorAll('[data-vinv]').forEach((b) => b.onclick = async () => {
     const reason = prompt('Void reason (audited):');
     if (!reason || reason.length < 3) return;
-    try { await post(`/invoices/${b.dataset.vinv}/void`, { reason, operation_id: uuid() }); toast('Invoice voided', 'ok'); render(); } catch (e) { errToast(e); }
+    try { await runOp(`/invoices/${b.dataset.vinv}/void`, {  reason, }); toast('Invoice voided', 'ok'); } catch (e) { errToast(e); }
+  });
+  document.querySelectorAll('[data-credit]').forEach((b) => b.onclick = () => creditNoteModal(+b.dataset.credit));
+  document.querySelectorAll('[data-cnap]').forEach((b) => b.onclick = async () => {
+    const note = prompt('Approval note:') || 'approved';
+    try { await runOp(`/credit-notes/${b.dataset.cnap}/approve`, {  note, }); toast('Credit note approved — outstanding reduced', 'ok'); }
+    catch (e) { errToast(e); }
+  });
+  document.querySelectorAll('[data-cnrj]').forEach((b) => b.onclick = async () => {
+    const note = prompt('Rejection note:') || 'rejected';
+    try { await runOp(`/credit-notes/${b.dataset.cnrj}/reject`, {  note, }); toast('Credit note rejected', 'ok'); }
+    catch (e) { errToast(e); }
+  });
+  document.querySelectorAll('[data-cnvd]').forEach((b) => b.onclick = async () => {
+    const reason = prompt('Void reason:') || 'voided';
+    try { await runOp(`/credit-notes/${b.dataset.cnvd}/void`, {  reason, }); toast('Credit note voided', 'ok'); }
+    catch (e) { errToast(e); }
   });
   $('#srf')?.addEventListener('submit', runStockReport);
+  $('#orf')?.addEventListener('submit', runOpsReport);
+  $('#orf select[name="kind"]')?.addEventListener('change', (ev) => {
+    const k = ev.target.value;
+    $('#orf-to').style.display = (k === 'daily' || k === 'stockby') ? 'none' : '';
+    $('#orf-ch').style.display = k === 'occupancy' ? '' : 'none';
+    $('#orf-by').style.display = k === 'stockby' ? '' : 'none';
+    $('#orf input[name="from_date"]').required = k !== 'stockby';
+  });
+  /* contracts & quality & orders wiring */
+  $('#newctr')?.addEventListener('click', newContractModal);
+  $('#newadv')?.addEventListener('click', () => newAdviceModal(null));
+  document.querySelectorAll('[data-cact]').forEach((b) => b.onclick = async () => {
+    const reason = prompt('Activation note (terms verified against…):');
+    if (!reason || reason.length < 3) return;
+    try { await runOp(`/contracts/${b.dataset.cact}/activate`, {  reason, }); toast('Contract active', 'ok'); }
+    catch (e) { errToast(e); }
+  });
+  document.querySelectorAll('[data-cclose]').forEach((b) => b.onclick = async () => {
+    const reason = prompt('Close reason (required):');
+    if (!reason || reason.length < 3) return;
+    const status = prompt('Close as: completed / cancelled / expired', 'completed');
+    if (!status || !['completed', 'cancelled', 'expired'].includes(status)) return;
+    try { await runOp(`/contracts/${b.dataset.cclose}/close/${status}`, {  reason, }); toast(`Contract ${status}`, 'ok'); }
+    catch (e) { errToast(e); }
+  });
+  document.querySelectorAll('[data-cview]').forEach((b) => b.onclick = () => contractModal(+b.dataset.cview));
+  document.querySelectorAll('[data-aview]').forEach((b) => b.onclick = () => adviceModal(+b.dataset.aview));
+  document.querySelectorAll('[data-axc]').forEach((b) => b.onclick = async () => {
+    const reason = prompt('Cancel reason:');
+    if (!reason || reason.length < 3) return;
+    try { await runOp(`/inward/advices/${b.dataset.axc}/cancel`, {  reason, }); toast('Advice cancelled', 'ok'); }
+    catch (e) { errToast(e); }
+  });
+  document.querySelectorAll('[data-aclc]').forEach((b) => b.onclick = async () => {
+    const reason = prompt('Close reason:');
+    if (!reason || reason.length < 3) return;
+    try { await runOp(`/inward/advices/${b.dataset.aclc}/close`, {  reason, }); toast('Advice closed', 'ok'); }
+    catch (e) { errToast(e); }
+  });
+  $('#newqinsp')?.addEventListener('click', () => newInspectionModal(null));
+  $('#qimport')?.addEventListener('click', gradingImportModal);
+  $('#newqchk')?.addEventListener('click', newCheckModal);
+  document.querySelectorAll('[data-qapply]').forEach((b) => b.onclick = () => applyInspectionModal(+b.dataset.qapply));
+  document.querySelectorAll('[data-qcancel]').forEach((b) => b.onclick = async () => {
+    const reason = prompt('Cancel reason:');
+    if (!reason || reason.length < 3) return;
+    try { await runOp(`/quality/inspections/${b.dataset.qcancel}/cancel`, {  reason, }); toast('Inspection cancelled', 'ok'); }
+    catch (e) { errToast(e); }
+  });
+  document.querySelectorAll('[data-qview]').forEach((b) => b.onclick = () => inspectionModal(+b.dataset.qview));
+  $('#neword')?.addEventListener('click', newOrderModal);
+  document.querySelectorAll('[data-oconf]').forEach((b) => b.onclick = async () => {
+    try { await runOp(`/orders/${b.dataset.oconf}/confirm`, {  reason: 'verified', }); toast('Order confirmed — availability validated', 'ok'); }
+    catch (e) { errToast(e); }
+  });
+  document.querySelectorAll('[data-ocxl]').forEach((b) => b.onclick = async () => {
+    const reason = prompt('Cancel reason:');
+    if (!reason || reason.length < 3) return;
+    try { await runOp(`/orders/${b.dataset.ocxl}/cancel`, {  reason, }); toast('Order cancelled', 'ok'); }
+    catch (e) { errToast(e); }
+  });
+  document.querySelectorAll('[data-oview]').forEach((b) => b.onclick = () => orderModal(+b.dataset.oview));
+  document.querySelectorAll('[data-dconf]').forEach((b) => b.onclick = () => deliveryConfirmModal(+b.dataset.dconf));
+  document.querySelectorAll('[data-dcxl]').forEach((b) => b.onclick = async () => {
+    const reason = prompt('Cancel reason:');
+    if (!reason || reason.length < 3) return;
+    try { await runOp(`/deliveries/${b.dataset.dcxl}/cancel`, {  reason, }); toast('Delivery cancelled', 'ok'); }
+    catch (e) { errToast(e); }
+  });
   $('#newuser')?.addEventListener('click', newUserModal);
   $('#dobak')?.addEventListener('click', async () => {
     try { const r = await post('/admin/backups'); toast(`Backup ${r.data.filename} (sha256 verified)`, 'ok'); render(); } catch (e) { errToast(e); }
@@ -1177,3 +1426,667 @@ window.addEventListener('hashchange', render);
   }
   render();
 })();
+
+/* ================= CONTRACTS & PRE-INWARD (A, B) ================= */
+async function viewContracts() {
+  const [contracts, advices] = await Promise.all([
+    get('/contracts'), can('inward.read') ? get('/inward/advices') : Promise.resolve([])]);
+  const rows = contracts.map((c) => {
+    const lineSummary = c.lines.map((l) => `${nf.format(l.expected_kg)} kg`).join(' + ');
+    return `<tr>
+    <td><b>${esc(c.contract_no)}</b></td><td>${esc(partyName(c.owner_id))}</td>
+    <td>${esc(c.title || '—')}</td>
+    <td class="mini">${c.valid_from} → ${c.valid_to}</td>
+    <td class="num">${lineSummary || '—'}</td>
+    <td>${esc(c.billing_cycle)}</td>
+    <td><span class="badge ${c.status}">${c.status}</span></td>
+    <td>${c.status === 'draft' && can('contracts.approve') ? `<button class="btn small" data-cact="${c.id}">Activate</button>` : ''}
+      ${(c.status === 'active' || c.status === 'draft') && can('contracts.approve') ? `<button class="btn small ghost danger" data-cclose="${c.id}">Close</button>` : ''}
+      <button class="btn small ghost" data-cview="${c.id}">Open</button></td></tr>`;
+  }).join('');
+  const advRows = advices.map((a) => `<tr>
+    <td><b>${esc(a.advice_no)}</b></td><td>${esc(partyName(a.owner_id))}</td>
+    <td>${a.expected_arrival_date}</td><td>${esc(a.vehicle_no || '—')}</td>
+    <td class="num">${kg(a.expected_kg)}</td><td class="num">${a.expected_units}</td>
+    <td><span class="badge ${a.status}">${a.status}</span></td>
+    <td>${can('inward.write') && a.status === 'open' ? `<button class="btn small ghost danger" data-axc="${a.id}">Cancel</button>` : ''}
+      ${can('inward.write') && (a.status === 'open' || a.status === 'arrived') ? `<button class="btn small ghost" data-aclc="${a.id}">Close</button>` : ''}
+      <button class="btn small ghost" data-aview="${a.id}">Reconcile</button></td></tr>`).join('');
+  return `
+  <div class="toolbar"><span style="flex:1"></span>
+    ${can('contracts.write') ? '<button class="btn" id="newctr">+ New contract</button>' : ''}
+    ${can('inward.write') ? '<button class="btn ghost" id="newadv">+ Pre-inward advice</button>' : ''}</div>
+  <div class="panel"><h2>Contracts &amp; crate bookings</h2><div class="body">
+    <table class="tbl"><thead><tr><th>No</th><th>Owner</th><th>Title</th><th>Validity</th>
+      <th class="num">Expected</th><th>Billing</th><th>Status</th><th></th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="8" class="note">no contracts yet</td></tr>'}</tbody></table></div></div>
+  <div class="panel"><h2>Pre-inward advices (expected arrivals)</h2><div class="body">
+    <table class="tbl"><thead><tr><th>No</th><th>Owner</th><th>Expected</th><th>Vehicle</th>
+      <th class="num">Expected kg</th><th class="num">Units</th><th>Status</th><th></th></tr></thead>
+    <tbody>${advRows || '<tr><td colspan="8" class="note">no advices yet</td></tr>'}</tbody></table></div></div>`;
+}
+
+function newContractModal() {
+  const m = M();
+  const owners = m.parties.filter((p) => p.roles.includes('owner'));
+  const o = modal('New storage contract (draft — second user activates)', `<form id="cf"><div class="frm-grid">
+    <div><label class="f">Season</label>${sel('season_id', m.seasons, 'id', 'name')}</div>
+    <div><label class="f">Owner *</label><select name="owner_id">${opt(owners, 'id', 'name')}</select></div>
+    <div><label class="f">Title</label><input name="title" placeholder="CA storage — crop 2026"></div>
+    <div><label class="f">Valid from *</label><input name="valid_from" type="date" required></div>
+    <div><label class="f">Valid to *</label><input name="valid_to" type="date" required></div>
+    <div><label class="f">Agreed tariff (rate card)</label><select name="tariff_id" id="c-tariff"></select></div>
+    <div><label class="f">Billing cycle</label><select name="billing_cycle"><option>monthly</option><option>seasonal</option><option>on_dispatch</option></select></div>
+    <div><label class="f">Payment terms (days)</label><input name="payment_terms_days" type="number" value="30" min="0"></div>
+    <div><label class="f">Notes</label><input name="notes"></div>
+  </div><h3 style="font-size:13px;margin:14px 0 6px">Expected stock (lines)</h3><div id="clines"></div>
+  <button type="button" class="btn ghost small" id="addcl">+ add line</button>
+  <div class="note">Expected quantities drive gate reconciliation. The tariff references the agreed rates — billing snapshots them onto invoices at generation time.</div>
+  <div class="actions"><button class="btn">Save draft</button></div></form>`);
+  get('/tariffs').then((ts) => {
+    const s = o.querySelector('#c-tariff');
+    s.innerHTML = '<option value="">— attach later —</option>' +
+      ts.filter((t) => t.status === 'active').map((t) =>
+        `<option value="${t.id}">${esc(t.code)} v${t.version}${t.owner_id ? ' · ' + esc(partyName(t.owner_id)) : ''}</option>`).join('');
+  }).catch(() => {});
+  const linesEl = o.querySelector('#clines');
+  const addLine = () => {
+    const d = document.createElement('div');
+    d.className = 'frm-grid';
+    d.innerHTML = `
+      <div><label class="f">Variety</label>${sel('', m.varieties, 'id', 'name').replace('name=""', 'class="cl-v"')}</div>
+      <div><label class="f">Grade (optional)</label><select class="cl-g"><option value="">any</option>${opt(m.grades, 'id', 'name')}</select></div>
+      <div><label class="f">Packaging</label>${sel('', m.packages, 'id', 'name').replace('name=""', 'class="cl-p"')}</div>
+      <div><label class="f">Expected kg</label><input class="cl-kg" type="number" step="0.001" min="0" value="0"></div>
+      <div><label class="f">Expected units</label><input class="cl-u" type="number" min="0" value="0"></div>`;
+    linesEl.appendChild(d);
+  };
+  o.querySelector('#addcl').onclick = addLine; addLine();
+  o.querySelector('#cf').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const v = formVals(ev.target);
+    const lines = [...linesEl.querySelectorAll('.frm-grid')].map((g) => ({
+      variety_id: +g.querySelector('.cl-v').value,
+      grade_id: intOr(g.querySelector('.cl-g').value) || null,
+      package_id: +g.querySelector('.cl-p').value,
+      expected_kg: +g.querySelector('.cl-kg').value || 0,
+      expected_units: +g.querySelector('.cl-u').value || 0,
+    }));
+    try {
+      const r = await submitOp('/contracts', {
+        season_id: +v.season_id, owner_id: +v.owner_id, title: v.title || '',
+        valid_from: v.valid_from, valid_to: v.valid_to,
+        tariff_id: intOr(v.tariff_id) || null, billing_cycle: v.billing_cycle,
+        payment_terms_days: +v.payment_terms_days || 30, notes: v.notes || '', lines,
+      }, 'contract');
+      if (r.queued) toast('Offline — contract queued', 'ok');
+      else toast(`Contract ${r.data.contract_no} saved as draft`, 'ok');
+      o.remove(); render();
+    } catch (e) { errToast(e); }
+  };
+}
+
+async function contractModal(cid) {
+  const c = await get(`/contracts/${cid}`);
+  const rec = c.reconciliation;
+  const advRows = rec.advices.map((a) => `<tr><td>${esc(a.advice_no)}</td><td>${a.status}</td>
+    <td class="num">${kg(a.expected_kg)}</td><td class="num">${kg(a.received_kg)}</td>
+    <td class="num">${a.variance_kg}</td></tr>`).join('');
+  let bp = '';
+  if (can('billing.read')) {
+    try { bp = await get(`/contracts/${cid}/billing-period`);
+      bp = `<div class="kv-line"><b>Suggested next billing period</b><span>${bp.from} → ${bp.to} (${bp.billing_cycle})</span></div>`;
+    } catch (e) { bp = ''; }
+  }
+  const o = modal(`Contract ${c.contract_no}`, `
+    <div class="kv-line"><b>Owner</b><span>${esc(partyName(c.owner_id))}</span></div>
+    <div class="kv-line"><b>Status</b><span><span class="badge ${c.status}">${c.status}</span></span></div>
+    <div class="kv-line"><b>Validity</b><span>${c.valid_from} → ${c.valid_to}</span></div>
+    <div class="kv-line"><b>Billing / terms</b><span>${esc(c.billing_cycle)} · ${c.payment_terms_days} days</span></div>
+    ${bp}
+    <h3 style="font-size:13px;margin:14px 0 6px">Expected vs received</h3>
+    <div class="cards" style="grid-template-columns:repeat(3,1fr)">
+      <div class="card"><div class="k">Expected</div><div class="v">${kg(rec.expected_kg)}</div></div>
+      <div class="card ok"><div class="k">Received</div><div class="v">${kg(rec.received_kg)}</div></div>
+      <div class="card ${Math.abs(rec.received_kg - rec.expected_kg) > 0 ? 'warn' : 'ok'}">
+        <div class="k">Fulfilment</div><div class="v">${rec.fulfilment_pct ?? '—'}%</div></div></div>
+    <table class="tbl"><thead><tr><th>Advice</th><th>Status</th><th class="num">Expected</th>
+      <th class="num">Received</th><th class="num">Variance</th></tr></thead>
+    <tbody>${advRows || '<tr><td colspan="5" class="note">no advices yet</td></tr>'}</tbody></table>
+    ${can('inward.write') ? `<div class="actions"><button class="btn ghost small" id="c-adv">+ advice for this contract</button></div>` : ''}`);
+  const b = o.querySelector('#c-adv');
+  if (b) b.onclick = () => newAdviceModal(cid);
+}
+
+function newAdviceModal(contractId) {
+  const m = M();
+  const owners = m.parties.filter((p) => p.roles.includes('owner'));
+  const o = modal('Pre-inward advice (expected arrival)', `<form id="af"><div class="frm-grid">
+    <div><label class="f">Contract</label><select name="contract_id" id="a-contract"><option value="">— ad-hoc (no contract) —</option></select></div>
+    <div><label class="f">Season</label>${sel('season_id', m.seasons, 'id', 'name')}</div>
+    <div><label class="f">Owner *</label><select name="owner_id" id="a-owner">${opt(owners, 'id', 'name')}</select></div>
+    <div><label class="f">Expected arrival *</label><input name="expected_arrival_date" type="date" required></div>
+    <div><label class="f">Vehicle no</label><input name="vehicle_no"></div>
+    <div><label class="f">Expected kg *</label><input name="expected_kg" type="number" step="0.001" min="0" required></div>
+    <div><label class="f">Expected units</label><input name="expected_units" type="number" min="0" value="0"></div>
+    <div><label class="f">Packaging</label>${sel('package_id', m.packages, 'id', 'name')}</div>
+    <div><label class="f">Variety</label>${sel('variety_id', m.varieties, 'id', 'name')}</div>
+    <div><label class="f">Grade (optional)</label><select name="grade_id"><option value="">—</option>${opt(m.grades, 'id', 'name')}</select></div>
+    <div><label class="f">Harvest year</label><input name="harvest_year" type="number" value="2026"></div>
+  </div><div class="note">Advice is linked at the gate: receipts reference it and reconciliation compares expected vs verified received.</div>
+  <div class="actions"><button class="btn">Save advice</button></div></form>`);
+  get('/contracts?status=active').then((cs) => {
+    const s = o.querySelector('#a-contract');
+    s.innerHTML += cs.map((c) => `<option value="${c.id}" ${c.id === contractId ? 'selected' : ''}>${esc(c.contract_no)} · ${esc(partyName(c.owner_id))}</option>`).join('');
+    const first = cs.find((c) => c.id === contractId);
+    if (first) o.querySelector('#a-owner').value = first.owner_id;
+    s.onchange = () => { const sel2 = cs.find((c) => c.id === +s.value); if (sel2) o.querySelector('#a-owner').value = sel2.owner_id; };
+  }).catch(() => {});
+  o.querySelector('#af').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const v = formVals(ev.target);
+    try {
+      const r = await submitOp('/inward/advices', {
+        contract_id: intOr(v.contract_id) || null, season_id: +v.season_id,
+        owner_id: +v.owner_id, expected_arrival_date: v.expected_arrival_date,
+        vehicle_no: v.vehicle_no || '', expected_kg: +v.expected_kg,
+        expected_units: +v.expected_units || 0, package_id: +v.package_id,
+        variety_id: +v.variety_id, grade_id: intOr(v.grade_id) || null,
+        harvest_year: +v.harvest_year,
+      }, 'advice');
+      if (r.queued) toast('Offline — advice queued', 'ok');
+      else toast(`Advice ${r.data.advice_no} saved`, 'ok');
+      o.remove(); render();
+    } catch (e) { errToast(e); }
+  };
+}
+
+async function adviceModal(aid) {
+  const a = await get(`/inward/advices/${aid}`);
+  const r = a.reconciliation;
+  const rows = r.receipts.map((x) => `<tr><td>${esc(x.receipt_no)}</td><td>${x.status}</td>
+    <td class="num">${kg(x.net_kg)}</td><td class="num">${x.units}</td><td>${esc(x.vehicle_no || '—')}</td></tr>`).join('');
+  modal(`Advice ${a.advice_no} — expected vs received`, `
+    <div class="cards" style="grid-template-columns:repeat(3,1fr)">
+      <div class="card"><div class="k">Expected</div><div class="v">${kg(r.expected_kg)}</div><div class="s">${r.expected_units} units</div></div>
+      <div class="card ok"><div class="k">Received</div><div class="v">${kg(r.received_kg)}</div><div class="s">${r.received_units} units · ${r.receipt_count} receipt(s)</div></div>
+      <div class="card ${r.variance_kg < 0 ? 'bad' : 'ok'}"><div class="k">Variance</div>
+        <div class="v">${r.variance_kg} kg</div><div class="s">${r.variance_pct === null ? 'no expectation' : r.variance_pct + '%'}</div></div></div>
+    <table class="tbl" style="margin-top:12px"><thead><tr><th>Receipt</th><th>Status</th>
+      <th class="num">Net</th><th class="num">Units</th><th>Vehicle</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="5" class="note">no verified receipts yet</td></tr>'}</tbody></table>`);
+}
+
+/* ================= QUALITY (E) ================= */
+async function viewQuality() {
+  const [checks, inspections] = await Promise.all(
+    [get('/quality/checks'), get('/quality/inspections')]);
+  const chkRows = checks.map((c) => `<tr><td><b>${esc(c.code)}</b></td><td>${esc(c.name)}</td>
+    <td>${esc(c.kind)}</td><td class="mini">${esc(c.description || '')}</td>
+    <td><span class="badge ${c.active ? 'active' : 'void'}">${c.active ? 'active' : 'inactive'}</span></td></tr>`).join('');
+  const rows = inspections.map((i) => `<tr>
+    <td><b>${esc(i.inspection_no)}</b></td><td>${esc(i.lot_no || i.lot_id)}</td>
+    <td>${i.inspected_at.slice(0, 16).replace('T', ' ')}</td>
+    <td class="num">${kg(i.rejected_kg)}</td><td class="num">${kg(i.downgraded_kg)}</td>
+    <td>${esc(i.verdict)}</td>
+    <td><span class="badge ${i.status}">${i.status}</span></td>
+    <td>${i.status === 'draft' && can('quality.write') ? `<button class="btn small" data-qapply="${i.id}">Apply</button>
+      <button class="btn small ghost danger" data-qcancel="${i.id}">Cancel</button>` : ''}
+      <button class="btn small ghost" data-qview="${i.id}">Open</button>
+      <button class="btn small ghost" data-print="/quality/inspections/${i.id}/print">Print</button></td></tr>`).join('');
+  return `
+  <div class="toolbar"><span style="flex:1"></span>
+    ${can('quality.write') ? '<button class="btn" id="newqinsp">+ New inspection</button>' : ''}
+    ${can('quality.write') ? '<button class="btn ghost" id="qimport">Import grading file</button>' : ''}
+    ${can('quality.approve') ? '<button class="btn ghost" id="newqchk">+ Check / defect</button>' : ''}</div>
+  <div class="panel"><h2>Inspections</h2><div class="body">
+    <table class="tbl"><thead><tr><th>No</th><th>Lot</th><th>When</th><th class="num">Rejected</th>
+      <th class="num">Downgraded</th><th>Verdict</th><th>Status</th><th></th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="8" class="note">no inspections yet</td></tr>'}</tbody></table></div></div>
+  <div class="panel"><h2>Inspection criteria (configurable)</h2><div class="body">
+    <table class="tbl"><thead><tr><th>Code</th><th>Name</th><th>Kind</th><th>Description</th><th></th></tr></thead>
+    <tbody>${chkRows || '<tr><td colspan="5" class="note">no criteria defined</td></tr>'}</tbody></table></div></div>`;
+}
+
+function newCheckModal() {
+  const o = modal('New inspection criterion', `<form id="ckf" class="frm-grid">
+    <div><label class="f">Code</label><input name="code" required placeholder="COLR"></div>
+    <div><label class="f">Name</label><input name="name" required></div>
+    <div><label class="f">Kind</label><select name="kind"><option>check</option><option>defect</option></select></div>
+    <div><label class="f">Description</label><input name="description"></div>
+    <div class="actions"><button class="btn">Save</button></div></form>`);
+  o.querySelector('#ckf').onsubmit = async (ev) => {
+    ev.preventDefault();
+    try { await runOp('/quality/checks', formVals(ev.target), 'Criterion saved'); o.remove(); }
+    catch (e) { errToast(e); }
+  };
+}
+
+async function newInspectionModal(lotId) {
+  const m = M();
+  const [checks, lots] = await Promise.all([get('/quality/checks'), get('/lots?limit=200')]);
+  const activeChecks = checks.filter((c) => c.active);
+  const lotSel = lotId
+    ? `<input type="hidden" name="lot_id" value="${lotId}"><div class="kv-line"><b>Lot</b><span>${esc((lots.find((l) => l.id === lotId) || {}).lot_no || lotId)}</span></div>`
+    : `<div><label class="f">Lot</label><select name="lot_id">${lots.map((l) => `<option value="${l.id}">${esc(l.lot_no)} · ${esc(l.variety)}/${esc(l.grade)}</option>`).join('')}</select></div>`;
+  const o = modal('New quality inspection (draft — apply moves stock)', `<form id="qf"><div class="frm-grid">
+    ${lotSel}
+    <div><label class="f">Verdict</label><select name="verdict"><option>pass</option><option>conditional</option><option>fail</option></select></div>
+    <div><label class="f">Sampled units</label><input name="sampled_units" type="number" min="0" value="0"></div>
+    <div><label class="f">Accepted kg</label><input name="accepted_kg" type="number" step="0.001" min="0" value="0"></div>
+    <div><label class="f">Rejected kg</label><input name="rejected_kg" type="number" step="0.001" min="0" value="0"></div>
+    <div><label class="f">Downgraded kg</label><input name="downgraded_kg" type="number" step="0.001" min="0" value="0"></div>
+    <div><label class="f">Target grade (downgrade)</label><select name="target_grade_id"><option value="">—</option>${opt(m.grades, 'id', 'name')}</select></div>
+    <div><label class="f">Notes</label><input name="notes"></div>
+  </div>
+  <h3 style="font-size:13px;margin:14px 0 6px">Check results</h3><div id="qitems"></div>
+  <button type="button" class="btn ghost small" id="addqi">+ add check</button>
+  <div class="note">Applying a rejected quantity removes it from the lot (audited movement); downgraded quantity becomes a child lot of the target grade. Quantities reconcile against the lot anchor.</div>
+  <div class="actions"><button class="btn">Save draft</button></div></form>`);
+  const itemsEl = o.querySelector('#qitems');
+  const addItem = () => {
+    const d = document.createElement('div');
+    d.className = 'frm-grid';
+    d.innerHTML = `
+      <div><label class="f">Check</label><select class="qi-check">${activeChecks.map((c) => `<option value="${c.id}">${esc(c.code)} · ${esc(c.name)} (${c.kind})</option>`).join('')}</select></div>
+      <div><label class="f">Result</label><select class="qi-result"><option>pass</option><option>fail</option><option>na</option><option>defect</option></select></div>
+      <div><label class="f">Value</label><input class="qi-value"></div>
+      <div><label class="f">Notes</label><input class="qi-notes"></div>`;
+    itemsEl.appendChild(d);
+  };
+  o.querySelector('#addqi').onclick = addItem; addItem();
+  o.querySelector('#qf').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const v = formVals(ev.target);
+    const items = [...itemsEl.querySelectorAll('.frm-grid')].map((g) => ({
+      check_id: +g.querySelector('.qi-check').value,
+      result: g.querySelector('.qi-result').value,
+      value: g.querySelector('.qi-value').value || '',
+      notes: g.querySelector('.qi-notes').value || '',
+    }));
+    try {
+      const d = await runOp('/quality/inspections', {
+        lot_id: +v.lot_id, sampled_units: +v.sampled_units || 0,
+        accepted_kg: +v.accepted_kg || 0, rejected_kg: +v.rejected_kg || 0,
+        downgraded_kg: +v.downgraded_kg || 0,
+        target_grade_id: intOr(v.target_grade_id) || null,
+        verdict: v.verdict, notes: v.notes || '', items,
+      }, (d) => `Inspection ${d.inspection_no} saved as draft`);
+      if (d) o.remove();
+    } catch (e) { errToast(e); }
+  };
+}
+
+async function applyInspectionModal(iid) {
+  const i = await get(`/quality/inspections/${iid}`);
+  const m = M();
+  const o = modal(`Apply inspection ${i.inspection_no}`, `<form id="qaf" class="frm-grid">
+    <div><label class="f">Where does the quantity sit?</label>
+      <select name="chamber_id" id="qa-ch"><option value="">un-allocated stock of the lot</option>
+      ${m.chambers.filter((c) => c.status === 'active').map((c) => `<option value="${c.id}">${esc(c.code)}</option>`).join('')}</select></div>
+    <div><label class="f">Packaging (required if chamber)</label><select name="package_id">${opt(m.packages, 'id', 'name')}</select></div>
+    <div><label class="f">Reason</label><input name="reason" required placeholder="what was found"></div>
+    <div class="actions"><button class="btn">Apply to stock</button></div></form>
+    <div class="note">Rejected ${kg(i.rejected_kg)} · downgraded ${kg(i.downgraded_kg)}. This posts audited movements and cannot be undone (void requires a new correction).</div>`);
+  o.querySelector('#qaf').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const v = formVals(ev.target);
+    try {
+      const d = await runOp(`/quality/inspections/${iid}/apply`, {
+        chamber_id: intOr(v.chamber_id) || null, package_id: +v.package_id,
+        reason: v.reason,
+      }, (d) => `Applied — downgraded to ${d.apply_result.downgrade_lot_no || 'n/a'}`);
+      if (d) { o.remove(); loadMasters(); }
+    } catch (e) { errToast(e); }
+  };
+}
+
+async function inspectionModal(iid) {
+  const i = await get(`/quality/inspections/${iid}`);
+  const items = i.items.map((it) => `<tr><td>${esc(it.check_code || it.check_id)}</td>
+    <td>${esc(it.result)}</td><td>${esc(it.value)}</td><td>${esc(it.notes)}</td></tr>`).join('');
+  const photos = i.photos.map((p) => `<tr><td>${esc(p.filename)}</td><td>${p.size_bytes} B</td><td>${esc(p.note)}</td></tr>`).join('');
+  const o = modal(`Inspection ${i.inspection_no}`, `
+    <div class="kv-line"><b>Lot</b><span>${esc(i.lot_no)}</span></div>
+    <div class="kv-line"><b>Status / verdict</b><span><span class="badge ${i.status}">${i.status}</span> · ${esc(i.verdict)}</span></div>
+    <div class="kv-line"><b>Quantities</b><span>accepted ${kg(i.accepted_kg)} · rejected ${kg(i.rejected_kg)} · downgraded ${kg(i.downgraded_kg)}</span></div>
+    <div class="kv-line"><b>Applied</b><span>${i.applied_at || '—'}</span></div>
+    <h3 style="font-size:13px;margin:14px 0 6px">Check results</h3>
+    <table class="tbl"><tbody>${items || '<tr><td class="note">—</td></tr>'}</tbody></table>
+    <h3 style="font-size:13px;margin:14px 0 6px">Photos</h3>
+    <table class="tbl"><tbody>${photos || '<tr><td class="note">none</td></tr>'}</tbody></table>
+    ${i.status !== 'cancelled' && can('quality.write') ? `<div class="actions">
+      <input type="file" id="qphoto" accept="image/png,image/jpeg" style="max-width:220px">
+      <button class="btn ghost small" id="qup">Attach photo</button></div>` : ''}`);
+  const f = o.querySelector('#qphoto');
+  if (f) o.querySelector('#qup').onclick = async () => {
+    if (!f.files.length) return toast('Choose an image first', 'err');
+    const buf = await f.files[0].arrayBuffer();
+    const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+    try {
+      await post(`/quality/inspections/${iid}/photos`, { data_b64: b64, note: f.files[0].name });
+      toast('Photo attached (sha256 recorded)', 'ok'); o.remove(); inspectionModal(iid);
+    } catch (e) { errToast(e); }
+  };
+}
+
+function gradingImportModal() {
+  const o = modal('Grading file import (validated, all-or-nothing)', `<div class="note">
+    Paste CSV rows: <code>lot_no,rejected_kg,downgraded_kg,target_grade_code,chamber_id,package_id,verdict,notes</code>
+    — a dry run validates every row first; nothing moves until you apply.</div>
+    <textarea id="qcsv" rows="6" style="width:100%;font-family:monospace;margin-top:8px" placeholder="LOT-000001,100,0,,,,pass,culls"></textarea>
+    <div class="actions"><button class="btn ghost small" id="qdry">Validate (dry run)</button>
+    <button class="btn small" id="qapply">Apply import</button></div><div id="qout"></div>`);
+  const parse = () => $('#qcsv').value.trim().split('\n').filter(Boolean).map((line) => {
+    const [lot_no, rejected_kg, downgraded_kg, target_grade_code, chamber_id, package_id, verdict, notes] = line.split(',');
+    return { lot_no: (lot_no || '').trim(), rejected_kg: +rejected_kg || 0,
+      downgraded_kg: +downgraded_kg || 0, target_grade_code: (target_grade_code || '').trim() || null,
+      chamber_id: intOr(chamber_id) || null, package_id: intOr(package_id) || null,
+      verdict: (verdict || 'pass').trim(), notes: (notes || '').trim() };
+  });
+  const run = async (dry) => {
+    try {
+      if (dry) {
+        const r = await post('/quality/grading-import', { rows: parse(), dry_run: true, operation_id: uuid() });
+        $('#qout').innerHTML = `<pre style="font-size:11px;white-space:pre-wrap">${esc(JSON.stringify(r.data, null, 1))}</pre>`;
+        return;
+      }
+      const d = await runOp('/quality/grading-import', { rows: parse(), dry_run: false },
+        (d) => `Import applied: ${d.applied} row(s) — stock moved with audit trail`);
+      if (d) { $('#qout').innerHTML = `<pre style="font-size:11px;white-space:pre-wrap">${esc(JSON.stringify(d, null, 1))}</pre>`; loadMasters(); }
+    } catch (e) { errToast(e); }
+  };
+  o.querySelector('#qdry').onclick = () => run(true);
+  o.querySelector('#qapply').onclick = () => {
+    if (!confirm('Apply import? Quantities move NOW (audited, all-or-nothing).')) return;
+    run(false);
+  };
+}
+
+/* ================= ORDERS, PICKING, PACKING, DELIVERY (H, I) ================= */
+async function viewOrders() {
+  const [orders, deliveries] = await Promise.all([get('/orders'), get('/deliveries')]);
+  const rows = orders.map((o) => `<tr>
+    <td><b>${esc(o.order_no)}</b></td><td>${esc(partyName(o.owner_id))}</td>
+    <td>${esc(o.destination || '—')}</td><td class="num">${kg((o.lines || []).reduce((s, l) => s + l.qty_kg, 0))}</td>
+    <td><span class="badge ${o.status}">${o.status}</span></td>
+    <td>${o.dispatch_id ? `DSP #${o.dispatch_id}` : '—'}</td>
+    <td>${o.status === 'draft' && can('orders.write') ? `<button class="btn small" data-oconf="${o.id}">Confirm</button>
+      <button class="btn small ghost danger" data-ocxl="${o.id}">Cancel</button>` : ''}
+      ${(o.status === 'confirmed' || o.status === 'picking' || o.status === 'packed') && can('orders.write') ? `<button class="btn small" data-oview="${o.id}">Pick / pack</button>` : ''}
+      <button class="btn small ghost" data-oview="${o.id}">Open</button>
+      <button class="btn small ghost" data-print="/orders/${o.id}/print">Print</button></td></tr>`).join('');
+  const dlRows = deliveries.map((d) => `<tr>
+    <td><b>${esc(d.delivery_no)}</b></td><td>${esc(partyName(d.owner_id))}</td>
+    <td class="num">${kg(d.planned_kg)}</td><td class="num">${kg(d.delivered_kg)}</td>
+    <td class="num">${kg(d.shortage_kg)}</td><td class="num">${kg(d.damage_kg)}</td>
+    <td><span class="badge ${d.status}">${d.status}</span></td>
+    <td>${d.status === 'in_transit' && can('deliveries.write') ? `<button class="btn small" data-dconf="${d.id}">Confirm</button>
+      <button class="btn small ghost danger" data-dcxl="${d.id}">Cancel</button>` : ''}
+      <button class="btn small ghost" data-print="/deliveries/${d.id}/print">Print</button></td></tr>`).join('');
+  return `
+  <div class="toolbar"><span style="flex:1"></span>
+    ${can('orders.write') ? '<button class="btn" id="neword">+ New outward order</button>' : ''}</div>
+  <div class="panel"><h2>Outward orders (order → confirm → pick → pack → dispatch)</h2><div class="body">
+    <table class="tbl"><thead><tr><th>No</th><th>Owner</th><th>Destination</th><th class="num">Ordered</th>
+      <th>Status</th><th>Dispatch</th><th></th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="7" class="note">no orders yet</td></tr>'}</tbody></table></div></div>
+  <div class="panel"><h2>Deliveries</h2><div class="body">
+    <table class="tbl"><thead><tr><th>No</th><th>Owner</th><th class="num">Planned</th>
+      <th class="num">Delivered</th><th class="num">Shortage</th><th class="num">Damage</th>
+      <th>Status</th><th></th></tr></thead>
+    <tbody>${dlRows || '<tr><td colspan="8" class="note">no deliveries yet</td></tr>'}</tbody></table></div></div>`;
+}
+
+function newOrderModal() {
+  const m = M();
+  const owners = m.parties.filter((p) => p.roles.includes('owner'));
+  const o = modal('New outward order (draft — second user confirms)', `<form id="of"><div class="frm-grid">
+    <div><label class="f">Season</label>${sel('season_id', m.seasons, 'id', 'name')}</div>
+    <div><label class="f">Owner *</label><select name="owner_id" id="o-owner">${opt(owners, 'id', 'name')}</select></div>
+    <div><label class="f">Destination</label><input name="destination"></div>
+    <div><label class="f">Notes</label><input name="notes"></div>
+  </div><h3 style="font-size:13px;margin:14px 0 6px">Requested quantities</h3><div id="olines"></div>
+  <button type="button" class="btn ghost small" id="addol">+ add line</button>
+  <div class="note">Confirming validates availability. Picking selects concrete lots/chambers; stock leaves only when the dispatch note is finalized.</div>
+  <div class="actions"><button class="btn">Save draft</button></div></form>`);
+  const linesEl = o.querySelector('#olines');
+  const addLine = () => {
+    const d = document.createElement('div');
+    d.className = 'frm-grid';
+    d.innerHTML = `
+      <div><label class="f">Variety (any)</label><select class="ol-v"><option value="">any</option>${opt(m.varieties, 'id', 'name')}</select></div>
+      <div><label class="f">Grade (any)</label><select class="ol-g"><option value="">any</option>${opt(m.grades, 'id', 'name')}</select></div>
+      <div><label class="f">Qty kg</label><input class="ol-kg" type="number" step="0.001" min="0" value="0"></div>
+      <div><label class="f">Units</label><input class="ol-u" type="number" min="0" value="0"></div>
+      <div><label class="f">Note</label><input class="ol-n"></div>`;
+    linesEl.appendChild(d);
+  };
+  o.querySelector('#addol').onclick = addLine; addLine();
+  o.querySelector('#of').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const v = formVals(ev.target);
+    const lines = [...linesEl.querySelectorAll('.frm-grid')].map((g) => ({
+      variety_id: intOr(g.querySelector('.ol-v').value) || null,
+      grade_id: intOr(g.querySelector('.ol-g').value) || null,
+      qty_kg: +g.querySelector('.ol-kg').value || 0,
+      units: +g.querySelector('.ol-u').value || 0,
+      note: g.querySelector('.ol-n').value || '',
+    }));
+    try {
+      const r = await submitOp('/orders', {
+        season_id: +v.season_id, owner_id: +v.owner_id, destination: v.destination || '',
+        notes: v.notes || '', lines,
+      }, 'order');
+      if (r.queued) toast('Offline — order queued', 'ok');
+      else toast(`Order ${r.data.order_no} saved as draft`, 'ok');
+      o.remove(); render();
+    } catch (e) { errToast(e); }
+  };
+}
+
+async function orderModal(oid) {
+  const o = await get(`/orders/${oid}`);
+  const m = M();
+  const pickRows = o.picks.map((p) => `<tr><td>${esc(p.lot_no)}</td><td>${esc(p.chamber)}</td>
+    <td>${esc(p.package)}</td><td class="num">${kg(p.qty_kg)}</td><td class="num">${p.units}</td>
+    <td>${(o.status === 'confirmed' || o.status === 'picking') && can('orders.write') ? `<button class="btn small ghost danger" data-rmpick="${p.id}">Remove</button>` : ''}</td></tr>`).join('');
+  const packRows = o.packing.map((p) => `<tr><td>${esc(p.package)}</td><td class="num">${p.unit_count}</td>
+    <td class="num">${kg(p.gross_kg)}</td><td class="num">${kg(p.tare_kg)}</td><td>${esc(p.notes)}</td></tr>`).join('');
+  const lineOpts = o.lines.map((l) => `<option value="${l.id}">line ${l.line_no} · ${kg(l.qty_kg)} / ${l.units}u</option>`).join('');
+  const canPick = (o.status === 'confirmed' || o.status === 'picking') && can('orders.write');
+  const canPack = (o.status === 'picking' || o.status === 'packed') && can('orders.write');
+  const canDispatch = o.status === 'packed' && can('dispatch.write');
+  const lots = o.status ? await get(`/lots?owner_id=${o.owner_id}`) : [];
+  const modal2 = modal(`Order ${o.order_no}`, `
+    <div class="kv-line"><b>Owner</b><span>${esc(partyName(o.owner_id))}</span></div>
+    <div class="kv-line"><b>Status</b><span><span class="badge ${o.status}">${o.status}</span></span></div>
+    <div class="kv-line"><b>Requested</b><span>${kg(o.ordered_kg)} / ${o.lines.reduce((s, l) => s + l.units, 0)}u · picked ${kg(o.picked_kg)}</span></div>
+    <div class="kv-line"><b>Destination</b><span>${esc(o.destination || '—')}</span></div>
+    <h3 style="font-size:13px;margin:14px 0 6px">Order lines</h3>
+    <table class="tbl"><thead><tr><th>#</th><th class="num">Qty</th><th class="num">Units</th><th>Note</th></tr></thead>
+    <tbody>${o.lines.map((l) => `<tr><td>${l.line_no}</td><td class="num">${kg(l.qty_kg)}</td><td class="num">${l.units}</td><td>${esc(l.note)}</td></tr>`).join('')}</tbody></table>
+    <h3 style="font-size:13px;margin:14px 0 6px">Picks</h3>
+    <table class="tbl"><thead><tr><th>Lot</th><th>Chamber</th><th>Pkg</th><th class="num">Qty</th><th class="num">Units</th><th></th></tr></thead>
+    <tbody>${pickRows || '<tr><td colspan="6" class="note">nothing picked yet</td></tr>'}</tbody></table>
+    ${canPick ? `<h3 style="font-size:13px;margin:14px 0 6px">Add pick</h3><div class="frm-grid">
+      <div><label class="f">Order line</label><select id="pk-line">${lineOpts}</select></div>
+      <div><label class="f">Lot</label><select id="pk-lot">${lots.filter((l) => l.stored_kg > 0).map((l) => `<option value="${l.id}">${esc(l.lot_no)} · ${kg(l.stored_kg)}</option>`).join('')}</select></div>
+      <div><label class="f">Chamber</label><select id="pk-ch"></select></div>
+      <div><label class="f">Qty kg</label><input id="pk-kg" type="number" step="0.001"></div>
+      <div><label class="f">Units</label><input id="pk-u" type="number" value="0" min="0"></div>
+      <div style="display:flex;align-items:end"><button class="btn small" id="pk-add">Pick</button></div></div>` : ''}
+    <h3 style="font-size:13px;margin:14px 0 6px">Packing</h3>
+    <table class="tbl"><thead><tr><th>Package</th><th class="num">Units</th><th class="num">Gross</th><th class="num">Tare</th><th>Notes</th></tr></thead>
+    <tbody>${packRows || '<tr><td colspan="5" class="note">not packed</td></tr>'}</tbody></table>
+    ${canPack ? `<div class="frm-grid"><div><label class="f">Package</label>${sel('pk2-p', m.packages, 'id', 'name')}</div>
+      <div><label class="f">Units packed</label><input id="pk2-u" type="number" min="0" value="0"></div>
+      <div><label class="f">Gross kg</label><input id="pk2-g" type="number" step="0.001" value="0"></div>
+      <div><label class="f">Tare kg</label><input id="pk2-t" type="number" step="0.001" value="0"></div>
+      <div style="display:flex;align-items:end"><button class="btn small" id="pk2-add">Record packing</button></div></div>` : ''}
+    ${canDispatch ? `<div class="actions"><button class="btn" id="od-dsp">Create dispatch note from picks</button></div>` : ''}`);
+  const lotSel = modal2.querySelector('#pk-lot');
+  const chSel = modal2.querySelector('#pk-ch');
+  const fillCh = async () => {
+    if (!lotSel) return;
+    const ld = await get(`/lots/${lotSel.value}`);
+    chSel.innerHTML = ld.balances.map((b) => `<option value="${b.chamber_id}|${b.package_id}">${esc(b.chamber)} · ${esc(b.package)} · ${kg(b.qty_kg)}</option>`).join('');
+  };
+  if (lotSel) { lotSel.onchange = fillCh; fillCh(); }
+  modal2.querySelector('#pk-add')?.addEventListener('click', async () => {
+    const [ch, pkg] = chSel.value.split('|');
+    try {
+      await runOp(`/orders/${oid}/picks`, { line_id: +modal2.querySelector('#pk-line').value,
+        lot_id: +lotSel.value, chamber_id: +ch, package_id: +pkg,
+        qty_kg: +modal2.querySelector('#pk-kg').value, units: +modal2.querySelector('#pk-u').value || 0,
+      }, 'Pick recorded — availability re-validated', { render: false });
+      modal2.remove(); orderModal(oid);
+    } catch (e) { errToast(e); }
+  });
+  modal2.querySelector('#pk2-add')?.addEventListener('click', async () => {
+    try {
+      await runOp(`/orders/${oid}/packing`, { package_id: +modal2.querySelector('select[name="pk2-p"]').value,
+        unit_count: +modal2.querySelector('#pk2-u').value || 0,
+        gross_kg: +modal2.querySelector('#pk2-g').value || 0, tare_kg: +modal2.querySelector('#pk2-t').value || 0,
+      }, 'Packing recorded', { render: false });
+      modal2.remove(); orderModal(oid);
+    } catch (e) { errToast(e); }
+  });
+  modal2.querySelector('#od-dsp')?.addEventListener('click', () => dispatchFromOrderModal(oid));
+  modal2.querySelectorAll('[data-rmpick]').forEach((b) => b.onclick = async () => {
+    try { await api('DELETE', `/orders/${oid}/picks/${b.dataset.rmpick}`); modal2.remove(); orderModal(oid); }
+    catch (e) { errToast(e); }
+  });
+}
+
+function dispatchFromOrderModal(oid) {
+  const o = modal('Create dispatch note (authorization details)', `<form id="df" class="frm-grid">
+    <div><label class="f">Authorized person *</label><input name="authorized_person_name" required></div>
+    <div><label class="f">ID proof type</label><select name="id_proof_type"><option>aadhaar</option><option>pan</option><option>driving licence</option><option>voter id</option><option>other</option></select></div>
+    <div><label class="f">ID proof no *</label><input name="id_proof_no" required></div>
+    <div><label class="f">Vehicle no</label><input name="vehicle_no"></div>
+    <div class="actions"><button class="btn">Create draft dispatch</button></div></form>
+    <div class="note">Picks are re-validated against live balances. Stock leaves inventory only at finalize (maker/checker stays).</div>`);
+  o.querySelector('#df').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const v = formVals(ev.target);
+    try {
+      const d = await runOp(`/orders/${oid}/dispatch`, { ...v },
+        (d) => `Dispatch ${d.dispatch.dispatch_no} created — finalize on the Dispatch page`);
+      if (d) o.remove();
+    } catch (e) { errToast(e); }
+  };
+}
+
+function deliveryConfirmModal(did) {
+  const o = modal('Confirm delivery (quantities must fully account)', `<form id="dcf" class="frm-grid">
+    <div><label class="f">Outcome</label><select name="status"><option>delivered</option><option>shortage</option><option>damaged</option></select></div>
+    <div><label class="f">Delivered kg</label><input name="delivered_kg" type="number" step="0.001" min="0" required></div>
+    <div><label class="f">Delivered units</label><input name="delivered_units" type="number" min="0" value="0"></div>
+    <div><label class="f">Shortage kg</label><input name="shortage_kg" type="number" step="0.001" min="0" value="0"></div>
+    <div><label class="f">Damage kg</label><input name="damage_kg" type="number" step="0.001" min="0" value="0"></div>
+    <div><label class="f">Received by</label><input name="received_by_name"></div>
+    <div><label class="f">Received by phone</label><input name="received_by_phone"></div>
+    <div><label class="f">Shortage/damage note</label><input name="shortage_note"></div>
+    <div class="actions"><button class="btn">Confirm</button></div></form>
+    <div class="note">delivered + shortage + damage must equal the planned dispatch quantity.</div>`);
+  o.querySelector('#dcf').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const v = formVals(ev.target);
+    try {
+      const d = await runOp(`/deliveries/${did}/confirm`, {
+        status: v.status, delivered_kg: +v.delivered_kg, delivered_units: +v.delivered_units || 0,
+        shortage_kg: +v.shortage_kg || 0, damage_kg: +v.damage_kg || 0,
+        received_by_name: v.received_by_name || '', received_by_phone: v.received_by_phone || '',
+        shortage_note: v.shortage_note || '',
+      }, 'Delivery confirmed (audited)');
+      if (d) o.remove();
+    } catch (e) { errToast(e); }
+  };
+}
+
+/* ================= BARCODE SCAN TOOL (D) ================= */
+function scanModal() {
+  const o = modal('Scan / resolve barcode', `
+    <form id="scf" style="display:flex;gap:8px">
+      <input id="sc-code" placeholder="CS1-… (scan or type)" style="flex:1;font-family:monospace" autofocus>
+      <button class="btn small">Resolve</button></form>
+    <div id="sc-out" style="margin-top:10px"><div class="note">Point the scanner at a label — device camera scanning is used when the browser supports it.</div></div>
+    <button class="btn ghost small" id="sc-cam" style="margin-top:8px">📷 Use camera</button>
+    <video id="sc-video" width="280" height="200" style="margin-top:8px;border-radius:8px;display:none"></video>`);
+  const out = o.querySelector('#sc-out');
+  const resolve = async (code) => {
+    try {
+      const r = await get(`/barcodes/resolve?code=${encodeURIComponent(code)}`);
+      if (!r.ok) {
+        out.innerHTML = `<div class="card bad" style="max-width:420px"><div class="k">Not resolvable</div><div class="v" style="font-size:14px">${esc(r.error || 'unknown')}</div></div>`;
+        return;
+      }
+      const lot = r.lot || {};
+      out.innerHTML = `<div class="card ok" style="max-width:480px"><div class="k">${esc(r.kind)}${r.unit_seq ? ' · unit ' + r.unit_seq : ''}</div>
+        <div class="v" style="font-size:16px">${esc(lot.lot_no || (r.entity || {}).receipt_no || '')}</div>
+        <div class="s">${esc(lot.owner || '')} · ${esc(lot.variety || '')} ${esc(lot.grade || '')} · stored ${kg(lot.received_kg || 0)}</div></div>
+        ${(r.balances || []).map((b) => `<div class="kv-line"><b>${esc(b.chamber)} · ${esc(b.package)}</b><span>${kg(b.qty_kg)} · ${b.units}u</span></div>`).join('')}
+        ${r.receipt ? `<div class="kv-line"><b>Receipt</b><span>${esc(r.receipt.receipt_no)}${r.receipt.contract_no ? ' · contract ' + esc(r.receipt.contract_no) : ''}</span></div>` : ''}`;
+    } catch (e) { errToast(e); }
+  };
+  o.querySelector('#scf').onsubmit = (ev) => { ev.preventDefault(); resolve(o.querySelector('#sc-code').value.trim()); };
+  const inp = o.querySelector('#sc-code');
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); resolve(inp.value.trim()); } });
+  inp.focus();
+  // camera scanning when BarcodeDetector is available (Android Chrome)
+  o.querySelector('#sc-cam').onclick = async () => {
+    if (!('BarcodeDetector' in window)) return toast('Camera scanning not supported on this device — use the scanner gun or type the code', 'err');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+      const video = o.querySelector('#sc-video');
+      video.style.display = 'block';
+      video.srcObject = stream;
+      await video.play();
+      const det = new BarcodeDetector({ formats: ['qr_code'] });
+      const tick = async () => {
+        if (!o.isConnected) { stream.getTracks().forEach((t) => t.stop()); return; }
+        try {
+          const codes = await det.detect(video);
+          if (codes.length) { inp.value = codes[0].rawValue; resolve(codes[0].rawValue); }
+        } catch (e) { /* keep scanning */ }
+        requestAnimationFrame(tick);
+      };
+      tick();
+    } catch (e) { errToast(e); }
+  };
+}
+
+/* lots modal additions: label issuance */
+async function barcodeIssueModal(lotId, lotNo, storedUnits) {
+  const m = M();
+  const o = modal(`Labels for lot ${lotNo}`, `<form id="bif" class="frm-grid">
+    <div><label class="f">Label kind</label><select name="kind" id="bi-kind">
+      <option value="crate_range">Crate range (per-unit codes)</option>
+      <option value="lot">Lot document label (1)</option></select></div>
+    <div><label class="f">Unit from</label><input name="unit_from" type="number" min="1" value="1"></div>
+    <div><label class="f">Unit to</label><input name="unit_to" type="number" min="1" value="${Math.min(storedUnits || 1, 500)}"></div>
+    <div><label class="f">Notes</label><input name="notes"></div>
+    <div class="actions"><button class="btn">Issue labels</button></div></form>
+    <div class="note">Codes are CS1-C-${esc(lotNo)}-U&lt;seq&gt;. Overlapping ranges are refused — a physical crate can never have two active identities. Print sheets carry real QR codes.</div>
+    <div id="bi-out"></div>`);
+  const kindSel = o.querySelector('#bi-kind');
+  kindSel.onchange = () => {
+    const range = kindSel.value === 'crate_range';
+    o.querySelector('[name="unit_from"]').disabled = !range;
+    o.querySelector('[name="unit_to"]').disabled = !range;
+  };
+  o.querySelector('#bif').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const v = formVals(ev.target);
+    try {
+      const d = await runOp('/barcodes/issues', {
+        kind: v.kind, entity_id: lotId,
+        unit_from: v.kind === 'crate_range' ? intOr(v.unit_from) : null,
+        unit_to: v.kind === 'crate_range' ? intOr(v.unit_to) : null,
+        notes: v.notes || '',
+      }, (d) => `${d.code_count} label code(s) issued`, { render: false });
+      if (d) { o.remove(); openPrint(`/barcodes/issues/${d.id}/print`); loadMasters(); }
+    } catch (e) { errToast(e); }
+  };
+}
