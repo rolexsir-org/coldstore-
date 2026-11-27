@@ -72,6 +72,8 @@ def _seed_masters():
         ("dispatch", "dispatch_operator", "dispatch-pass-1"),
         ("auditor", "auditor", "auditor-pass-01"),
         ("monitor", "ca_monitor", "monitor-pass-01"),
+        ("contracts", "contract_operator", "contract-pass-01"),
+        ("inspector", "quality_inspector", "inspector-pass-01"),
     ]
     for un, role, pw in users:
         db.add(User(username=un, display_name=un.title(), role=role,
@@ -111,7 +113,8 @@ def client():
 PW = {"admin": ADMIN_PW, "manager": "manager-pass-01", "intake": "intake-pass-001",
       "intake2": "intake-pass-002", "invop": "invop-pass-0001", "billing": "billing-pass-01",
       "dispatch": "dispatch-pass-1", "auditor": "auditor-pass-01",
-      "monitor": "monitor-pass-01"}
+      "monitor": "monitor-pass-01", "contracts": "contract-pass-01",
+      "inspector": "inspector-pass-01"}
 
 
 def login(client: TestClient, username: str) -> dict:

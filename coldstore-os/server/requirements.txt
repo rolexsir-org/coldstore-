@@ -5,11 +5,14 @@
 #   alembic                   — automated database migrations (required deliverable)
 #   pydantic                  — DTO/input validation ( FastAPI dependency, pinned explicitly )
 #   httpx, pytest             — test-only (client + runner)
+#   segno                     — pure-Python QR encoder for scannable barcode labels
+#                               (zero transitive deps; keeps the LAN no-CDN rule)
 fastapi==0.143.0
 starlette==1.7.0
 uvicorn[standard]==0.54.0
 SQLAlchemy==2.1.4
 alembic==1.20.0
 pydantic==2.13.5
+segno==1.6.6
 httpx==0.28.1
 pytest==9.0.3

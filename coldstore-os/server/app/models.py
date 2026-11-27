@@ -179,6 +179,8 @@ class IntakeReceipt(Base):
     # draft|verified|superseded|cancelled
     supersedes_id: Mapped[int | None] = mapped_column(ForeignKey("intake_receipts.id"), nullable=True)
     correction_reason: Mapped[str] = mapped_column(String(300), default="")
+    advice_id: Mapped[int | None] = mapped_column(ForeignKey("inward_advices.id"),
+                                                  nullable=True, index=True)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     verified_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
@@ -290,6 +292,8 @@ class DispatchNote(Base):
     status: Mapped[str] = mapped_column(String(16), default="draft", index=True)  # draft|finalized|void
     void_reason: Mapped[str] = mapped_column(String(300), default="")
     notes: Mapped[str] = mapped_column(String(400), default="")
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("outward_orders.id"),
+                                                 nullable=True, index=True)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     finalized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -354,6 +358,8 @@ class Invoice(Base):
     invoice_no: Mapped[str] = mapped_column(String(24), unique=True, index=True)
     owner_id: Mapped[int] = mapped_column(ForeignKey("parties.id"), index=True)
     season_id: Mapped[int | None] = mapped_column(ForeignKey("seasons.id"), nullable=True)
+    contract_id: Mapped[int | None] = mapped_column(ForeignKey("contracts.id"),
+                                                    nullable=True, index=True)
     period_from: Mapped[date] = mapped_column(Date)
     period_to: Mapped[date] = mapped_column(Date)
     tariff_id: Mapped[int] = mapped_column(ForeignKey("tariffs.id"))
@@ -448,3 +454,292 @@ class BackupFile(Base):
     sha256: Mapped[str] = mapped_column(String(64))
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ---------------------------------------------------------------- contracts (A)
+class Contract(Base):
+    """Commercial storage contract / crate booking for one owner party.
+
+    Rates are referenced, never copied: `tariff_id` points at an (owner-scoped)
+    Tariff whose lines the deterministic billing engine snapshots at invoice
+    generation. Status lifecycle: draft → active → completed|cancelled|expired.
+    Approval is maker≠checker (activated by a different user than created it).
+    """
+    __tablename__ = "contracts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    contract_no: Mapped[str] = mapped_column(String(24), unique=True, index=True)
+    season_id: Mapped[int] = mapped_column(ForeignKey("seasons.id"), index=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("parties.id"), index=True)
+    title: Mapped[str] = mapped_column(String(160), default="")
+    status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
+    # draft|active|completed|cancelled|expired
+    valid_from: Mapped[date] = mapped_column(Date)
+    valid_to: Mapped[date] = mapped_column(Date)
+    tariff_id: Mapped[int | None] = mapped_column(ForeignKey("tariffs.id"), nullable=True)
+    billing_cycle: Mapped[str] = mapped_column(String(12), default="monthly")
+    # monthly|seasonal|on_dispatch (billing-period suggestion only; engine is period-driven)
+    payment_terms_days: Mapped[int] = mapped_column(Integer, default=30)
+    notes: Mapped[str] = mapped_column(String(500), default="")
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    approved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    closed_reason: Mapped[str] = mapped_column(String(300), default="")
+    operation_id: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    lines: Mapped[list["ContractLine"]] = relationship(cascade="all, delete-orphan")
+
+
+class ContractLine(Base):
+    __tablename__ = "contract_lines"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    contract_id: Mapped[int] = mapped_column(ForeignKey("contracts.id"), index=True)
+    variety_id: Mapped[int] = mapped_column(ForeignKey("varieties.id"))
+    grade_id: Mapped[int | None] = mapped_column(ForeignKey("grades.id"), nullable=True)
+    package_id: Mapped[int] = mapped_column(ForeignKey("packages.id"))
+    expected_kg: Mapped[float] = mapped_column(Numeric(14, 3), default=0)
+    expected_units: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class InwardAdvice(Base):
+    """Pre-inward registration (advance inward): an expected arrival against a
+    contract (or ad-hoc), reconciled later against actual receipts."""
+    __tablename__ = "inward_advices"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    advice_no: Mapped[str] = mapped_column(String(24), unique=True, index=True)
+    contract_id: Mapped[int | None] = mapped_column(ForeignKey("contracts.id"),
+                                                    nullable=True, index=True)
+    season_id: Mapped[int] = mapped_column(ForeignKey("seasons.id"))
+    owner_id: Mapped[int] = mapped_column(ForeignKey("parties.id"), index=True)
+    expected_arrival_date: Mapped[date] = mapped_column(Date)
+    vehicle_no: Mapped[str] = mapped_column(String(24), default="")
+    expected_kg: Mapped[float] = mapped_column(Numeric(14, 3), default=0)
+    expected_units: Mapped[int] = mapped_column(Integer, default=0)
+    package_id: Mapped[int] = mapped_column(ForeignKey("packages.id"))
+    variety_id: Mapped[int] = mapped_column(ForeignKey("varieties.id"))
+    grade_id: Mapped[int | None] = mapped_column(ForeignKey("grades.id"), nullable=True)
+    harvest_year: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True)
+    # open|arrived|closed|cancelled
+    notes: Mapped[str] = mapped_column(String(400), default="")
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    closed_reason: Mapped[str] = mapped_column(String(300), default="")
+    operation_id: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+
+
+# ---------------------------------------------------------------- quality (E)
+class QualityCheck(Base):
+    """Configurable inspection-criteria master. kind=check → pass/fail/n-a;
+    kind=defect → recorded defect observation."""
+    __tablename__ = "quality_checks"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(24), unique=True)
+    name: Mapped[str] = mapped_column(String(80))
+    kind: Mapped[str] = mapped_column(String(12), default="check")  # check|defect
+    description: Mapped[str] = mapped_column(String(200), default="")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class QualityInspection(Base):
+    """Inspection of a lot. Applying it adjusts stock through the ONE inventory
+    path: rejections debit chambers (or reduce unallocated received_kg), downgrades
+    reuse split-with-regrade. Quantities reconcile: accepted + rejected + downgraded
+    == sampled span actually removed from the source lot."""
+    __tablename__ = "quality_inspections"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    inspection_no: Mapped[str] = mapped_column(String(24), unique=True, index=True)
+    lot_id: Mapped[int] = mapped_column(ForeignKey("lots.id"), index=True)
+    inspected_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    inspector_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    status: Mapped[str] = mapped_column(String(12), default="draft", index=True)
+    # draft|applied|cancelled
+    sampled_units: Mapped[int] = mapped_column(Integer, default=0)
+    accepted_kg: Mapped[float] = mapped_column(Numeric(14, 3), default=0)
+    rejected_kg: Mapped[float] = mapped_column(Numeric(14, 3), default=0)
+    downgraded_kg: Mapped[float] = mapped_column(Numeric(14, 3), default=0)
+    target_grade_id: Mapped[int | None] = mapped_column(ForeignKey("grades.id"), nullable=True)
+    verdict: Mapped[str] = mapped_column(String(12), default="pass")  # pass|conditional|fail
+    notes: Mapped[str] = mapped_column(String(500), default="")
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    applied_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    result_meta: Mapped[dict] = mapped_column(JSON, default=dict)
+    # {"reject_movements":[...], "downgrade_lot": "LOT-...", ...}
+    operation_id: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    items: Mapped[list["QualityInspectionItem"]] = relationship(cascade="all, delete-orphan")
+
+
+class QualityInspectionItem(Base):
+    __tablename__ = "quality_inspection_items"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    inspection_id: Mapped[int] = mapped_column(ForeignKey("quality_inspections.id"), index=True)
+    check_id: Mapped[int] = mapped_column(ForeignKey("quality_checks.id"))
+    result: Mapped[str] = mapped_column(String(12), default="pass")  # pass|fail|na|defect
+    value: Mapped[str] = mapped_column(String(120), default="")
+    notes: Mapped[str] = mapped_column(String(300), default="")
+
+
+class QualityPhoto(Base):
+    """Quality photograph stored server-side (LAN, no external hosting).
+    Integrity-verified: sha256 of the bytes is recorded and re-checked on read."""
+    __tablename__ = "quality_photos"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    inspection_id: Mapped[int] = mapped_column(ForeignKey("quality_inspections.id"), index=True)
+    filename: Mapped[str] = mapped_column(String(160))
+    sha256: Mapped[str] = mapped_column(String(64))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    note: Mapped[str] = mapped_column(String(200), default="")
+    uploaded_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ---------------------------------------------------------------- barcodes (D)
+class BarcodeIssue(Base):
+    """Issued label registry. One row per issuance:
+    kind=receipt|lot → a single document/lot label (count=1);
+    kind=crate_range → per-unit crate codes derived deterministically as
+    CS1-C-<lot_no>-U<seq:05d> for seq in [unit_from, unit_to] — unique by
+    construction and range-validated at scan time, so crate identity never
+    needs one DB row per physical crate (18k lots × 500 units stays flat)."""
+    __tablename__ = "barcode_issues"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(12), index=True)  # receipt|lot|crate_range
+    entity_id: Mapped[int] = mapped_column(Integer, index=True)  # receipt/lot id
+    unit_from: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    unit_to: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    count: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(12), default="active", index=True)
+    # active|void
+    print_count: Mapped[int] = mapped_column(Integer, default=0)
+    notes: Mapped[str] = mapped_column(String(300), default="")
+    void_reason: Mapped[str] = mapped_column(String(300), default="")
+    issued_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    operation_id: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    __table_args__ = (
+        CheckConstraint("unit_from IS NULL OR unit_to IS NULL OR unit_to >= unit_from",
+                        name="ck_barcode_range"),
+    )
+
+
+# ---------------------------------------------------------------- outward (H, I)
+class OutwardOrder(Base):
+    """Material outward order: customer order → availability check → picking →
+    packing → dispatch note (existing path) → delivery. Order status:
+    draft → confirmed → picking → packed → dispatched → closed|cancelled."""
+    __tablename__ = "outward_orders"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_no: Mapped[str] = mapped_column(String(24), unique=True, index=True)
+    season_id: Mapped[int] = mapped_column(ForeignKey("seasons.id"))
+    owner_id: Mapped[int] = mapped_column(ForeignKey("parties.id"), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
+    destination: Mapped[str] = mapped_column(String(160), default="")
+    notes: Mapped[str] = mapped_column(String(400), default="")
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    confirmed_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # back-reference to the linked dispatch note. Deliberately a PLAIN indexed
+    # integer (not an FK): dispatch_notes.order_id already carries the enforced
+    # FK in the strong direction, and a second FK would create a create/drop
+    # cycle the two tables can't resolve on SQLite (no ALTER support).
+    dispatch_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    closed_reason: Mapped[str] = mapped_column(String(300), default="")
+    operation_id: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    lines: Mapped[list["OutwardOrderLine"]] = relationship(cascade="all, delete-orphan")
+
+
+class OutwardOrderLine(Base):
+    __tablename__ = "outward_order_lines"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("outward_orders.id"), index=True)
+    line_no: Mapped[int] = mapped_column(Integer, default=1)
+    variety_id: Mapped[int | None] = mapped_column(ForeignKey("varieties.id"), nullable=True)
+    grade_id: Mapped[int | None] = mapped_column(ForeignKey("grades.id"), nullable=True)
+    lot_id: Mapped[int | None] = mapped_column(ForeignKey("lots.id"), nullable=True)
+    qty_kg: Mapped[float] = mapped_column(Numeric(14, 3), default=0)
+    units: Mapped[int] = mapped_column(Integer, default=0)
+    note: Mapped[str] = mapped_column(String(200), default="")
+
+
+class OrderPick(Base):
+    """Picked stock for an order line: a concrete (lot, chamber, package) debit
+    plan. Validated against live balances at pick time AND re-validated when the
+    dispatch note is created from the picks."""
+    __tablename__ = "order_picks"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("outward_orders.id"), index=True)
+    line_id: Mapped[int] = mapped_column(ForeignKey("outward_order_lines.id"), index=True)
+    lot_id: Mapped[int] = mapped_column(ForeignKey("lots.id"))
+    chamber_id: Mapped[int] = mapped_column(ForeignKey("chambers.id"))
+    package_id: Mapped[int] = mapped_column(ForeignKey("packages.id"))
+    qty_kg: Mapped[float] = mapped_column(Numeric(14, 3))
+    units: Mapped[int] = mapped_column(Integer, default=0)
+    picked_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    picked_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class PackingRecord(Base):
+    __tablename__ = "packing_records"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("outward_orders.id"), index=True)
+    package_id: Mapped[int] = mapped_column(ForeignKey("packages.id"))
+    unit_count: Mapped[int] = mapped_column(Integer, default=0)
+    gross_kg: Mapped[float] = mapped_column(Numeric(14, 3), default=0)
+    tare_kg: Mapped[float] = mapped_column(Numeric(14, 3), default=0)
+    notes: Mapped[str] = mapped_column(String(300), default="")
+    packed_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    packed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class DeliveryRecord(Base):
+    """Delivery of a finalized dispatch note: departure, confirmation at the
+    customer, shortage/damage reporting. Money-neutral; quantities reconcile
+    against the dispatch note's lines."""
+    __tablename__ = "delivery_records"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    delivery_no: Mapped[str] = mapped_column(String(24), unique=True, index=True)
+    dispatch_id: Mapped[int] = mapped_column(ForeignKey("dispatch_notes.id"), index=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("parties.id"), index=True)
+    vehicle_no: Mapped[str] = mapped_column(String(24), default="")
+    driver_name: Mapped[str] = mapped_column(String(120), default="")
+    departed_at: Mapped[datetime] = mapped_column(DateTime)
+    planned_kg: Mapped[float] = mapped_column(Numeric(14, 3), default=0)
+    planned_units: Mapped[int] = mapped_column(Integer, default=0)
+    delivered_kg: Mapped[float] = mapped_column(Numeric(14, 3), default=0)
+    delivered_units: Mapped[int] = mapped_column(Integer, default=0)
+    shortage_kg: Mapped[float] = mapped_column(Numeric(14, 3), default=0)
+    damage_kg: Mapped[float] = mapped_column(Numeric(14, 3), default=0)
+    shortage_note: Mapped[str] = mapped_column(String(400), default="")
+    status: Mapped[str] = mapped_column(String(16), default="in_transit", index=True)
+    # in_transit|delivered|shortage|damaged|cancelled
+    received_by_name: Mapped[str] = mapped_column(String(160), default="")
+    received_by_phone: Mapped[str] = mapped_column(String(32), default="")
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    notes: Mapped[str] = mapped_column(String(400), default="")
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    operation_id: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+
+
+# ---------------------------------------------------------------- credit notes (J)
+class CreditNote(Base):
+    """Partial/full credit against a FINALIZED invoice. Maker≠checker; only
+    APPROVED credit notes reduce outstanding. Never edits the invoice totals —
+    outstanding math subtracts approved credits (auditable, reversible via void)."""
+    __tablename__ = "credit_notes"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    credit_no: Mapped[str] = mapped_column(String(24), unique=True, index=True)
+    invoice_id: Mapped[int] = mapped_column(ForeignKey("invoices.id"), index=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("parties.id"), index=True)
+    amount_minor: Mapped[int] = mapped_column(Integer)
+    reason: Mapped[str] = mapped_column(String(400))
+    status: Mapped[str] = mapped_column(String(12), default="draft", index=True)
+    # draft|approved|void
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    approved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    approved_note: Mapped[str] = mapped_column(String(300), default="")
+    void_reason: Mapped[str] = mapped_column(String(300), default="")
+    operation_id: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+

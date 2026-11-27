@@ -8,7 +8,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .models import (Chamber, DispatchLine, DispatchNote, Grade, IntakeReceipt,
-                     Invoice, InvoiceLine, Lot, Package, Party, Season, Variety)
+                     Invoice, InvoiceLine, Lot, OutwardOrderLine, Package, Party,
+                     QualityInspectionItem, QualityCheck, QualityPhoto, Season, Variety)
 
 _CSS = """
 <style>
@@ -155,3 +156,104 @@ def statement_html(st: dict) -> str:
 <tr><td class='right'><b>Credit balance</b></td><td class='right'>{_money(st['credit_minor'])}</td></tr>
 <tr><td class='right'><b>Net due</b></td><td class='right tot'>{_money(st['net_due_minor'])}</td></tr></table>"""
     return _page(f"Statement — {st['owner']['code']}", body)
+
+
+def inspection_html(db: Session, i) -> str:
+    lot = db.get(Lot, i.lot_id)
+    owner = db.get(Party, lot.owner_id) if lot else None
+    items = db.scalars(select(QualityInspectionItem)
+                       .where(QualityInspectionItem.inspection_id == i.id)
+                       .order_by(QualityInspectionItem.id)).all()
+    checks = {c.id: c for c in db.scalars(select(QualityCheck))}
+    item_rows = "".join(
+        f"<tr><td>{escape(checks[it.check_id].code if it.check_id in checks else '?')}</td>"
+        f"<td>{escape(checks[it.check_id].name if it.check_id in checks else '')}</td>"
+        f"<td>{escape(it.result)}</td><td>{escape(it.value)}</td>"
+        f"<td>{escape(it.notes)}</td></tr>" for it in items)
+    photos = db.scalars(select(QualityPhoto)
+                        .where(QualityPhoto.inspection_id == i.id)
+                        .order_by(QualityPhoto.id)).all()
+    photo_rows = "".join(f"<li>{escape(p.filename.split('/')[-1])} "
+                         f"({p.size_bytes} bytes)</li>" for p in photos)
+    body = f"""
+<div class='grid'>
+ <div><b>Inspection:</b> {escape(i.inspection_no)}</div><div><b>Status:</b> {i.status}</div>
+ <div><b>Lot:</b> {escape(lot.lot_no) if lot else '—'}</div>
+ <div><b>Owner:</b> {_party(db, lot.owner_id) if lot else '—'}</div>
+ <div><b>Inspector:</b> user #{i.inspector_id}</div><div><b>Verdict:</b> {i.verdict}</div>
+</div>
+<table><tr><th class='right'>Sampled units</th><th class='right'>Accepted kg</th>
+<th class='right'>Rejected kg</th><th class='right'>Downgraded kg</th>
+<th>Target grade</th></tr>
+<tr><td class='right'>{i.sampled_units}</td><td class='right'>{float(i.accepted_kg):,.3f}</td>
+<td class='right'>{float(i.rejected_kg):,.3f}</td>
+<td class='right'>{float(i.downgraded_kg):,.3f}</td>
+<td>{db.get(Grade, i.target_grade_id).name if i.target_grade_id else '—'}</td></tr></table>
+<h3>Check results</h3>
+<table><tr><th>Code</th><th>Check</th><th>Result</th><th>Value</th><th>Notes</th></tr>
+{item_rows or '<tr><td colspan=5>no item rows</td></tr>'}</table>
+<div class='box'><b>Notes:</b> {escape(i.notes) or '—'}<br>
+<b>Photos:</b> {photo_rows or '—'}</div>
+<div class='box'><b>Applied:</b> {i.applied_at or 'not applied'} ·
+result: {escape(str(i.result_meta))}</div>
+<div class='grid' style='margin-top:24px'><div>Inspector: ____________</div>
+<div style='text-align:right'>Manager: ____________</div></div>"""
+    return _page(f"Quality inspection {i.inspection_no}", body)
+
+
+def order_html(db: Session, o) -> str:
+    owner = db.get(Party, o.owner_id)
+    lines = db.scalars(select(OutwardOrderLine)
+                       .where(OutwardOrderLine.order_id == o.id)
+                       .order_by(OutwardOrderLine.line_no)).all()
+    vmap = {v.id: v.name for v in db.scalars(select(Variety))}
+    gmap = {g.id: g.name for g in db.scalars(select(Grade))}
+    line_rows = "".join(
+        f"<tr><td>{l.line_no}</td>"
+        f"<td>{escape(vmap.get(l.variety_id, '—') if l.variety_id else '—')}</td>"
+        f"<td>{escape(gmap.get(l.grade_id, '—') if l.grade_id else '—')}</td>"
+        f"<td class='right'>{float(l.qty_kg):,.3f}</td><td class='right'>{l.units}</td>"
+        f"<td>{escape(l.note)}</td></tr>" for l in lines)
+    body = f"""
+<div class='grid'>
+ <div><b>Order:</b> {escape(o.order_no)}</div><div><b>Status:</b> {o.status}</div>
+ <div><b>Owner:</b> {_party(db, o.owner_id)}</div>
+ <div><b>Destination:</b> {escape(o.destination) or '—'}</div>
+ <div><b>Created:</b> {str(o.created_at)[:16]}</div>
+ <div><b>Confirmed:</b> {str(o.confirmed_at)[:16] if o.confirmed_at else '—'}</div>
+</div>
+<table><tr><th>#</th><th>Variety</th><th>Grade</th><th class='right'>Qty kg</th>
+<th class='right'>Units</th><th>Note</th></tr>{line_rows}</table>
+<div class='box'><b>Notes:</b> {escape(o.notes) or '—'}<br>
+<b>Closed:</b> {escape(o.closed_reason) or '—'}</div>
+<div class='grid' style='margin-top:24px'><div>Order by: ____________</div>
+<div style='text-align:right'>Warehouse: ____________</div></div>"""
+    return _page(f"Outward order {o.order_no}", body)
+
+
+def delivery_html(db: Session, d) -> str:
+    dn = db.get(DispatchNote, d.dispatch_id)
+    owner = db.get(Party, d.owner_id)
+    body = f"""
+<div class='grid'>
+ <div><b>Delivery:</b> {escape(d.delivery_no)}</div><div><b>Status:</b> {d.status}</div>
+ <div><b>Dispatch:</b> {escape(dn.dispatch_no) if dn else '—'}</div>
+ <div><b>Owner:</b> {_party(db, d.owner_id)}</div>
+ <div><b>Vehicle:</b> {escape(d.vehicle_no)}</div><div><b>Driver:</b> {escape(d.driver_name)}</div>
+ <div><b>Departed:</b> {d.departed_at:%Y-%m-%d %H:%M}</div>
+ <div><b>Confirmed:</b> {d.confirmed_at:%Y-%m-%d %H:%M if d.confirmed_at else '—'}</div>
+</div>
+<table><tr><th class='right'>Planned kg</th><th class='right'>Planned units</th>
+<th class='right'>Delivered kg</th><th class='right'>Delivered units</th>
+<th class='right'>Shortage kg</th><th class='right'>Damage kg</th></tr>
+<tr><td class='right'>{float(d.planned_kg):,.3f}</td><td class='right'>{d.planned_units}</td>
+<td class='right'>{float(d.delivered_kg):,.3f}</td><td class='right'>{d.delivered_units}</td>
+<td class='right'>{float(d.shortage_kg):,.3f}</td>
+<td class='right'>{float(d.damage_kg):,.3f}</td></tr></table>
+<div class='box'><b>Received by:</b> {escape(d.received_by_name) or '—'} ·
+{escape(d.received_by_phone) or '—'}<br>
+<b>Shortage/damage note:</b> {escape(d.shortage_note) or '—'}<br>
+<b>Notes:</b> {escape(d.notes) or '—'}</div>
+<div class='grid' style='margin-top:24px'><div>Delivered by: ____________</div>
+<div style='text-align:right'>Received by: ____________</div></div>"""
+    return _page(f"Delivery {d.delivery_no}", body)

@@ -274,7 +274,7 @@ def finalize_invoice(db: Session, *, inv: Invoice, actor, operation_id, now) -> 
 
 
 def invoice_outstanding_minor(db: Session, invoice_id: int) -> int:
-    from ..models import Payment, PaymentAllocation
+    from ..models import CreditNote, Payment, PaymentAllocation
     inv = db.get(Invoice, invoice_id)
     if inv is None:
         return 0
@@ -282,7 +282,10 @@ def invoice_outstanding_minor(db: Session, invoice_id: int) -> int:
         select(func.coalesce(func.sum(PaymentAllocation.amount_minor), 0))
         .join(Payment, Payment.id == PaymentAllocation.payment_id)
         .where(PaymentAllocation.invoice_id == invoice_id, Payment.status == "posted"))
-    return inv.total_minor - int(paid or 0)
+    credited = db.scalar(
+        select(func.coalesce(func.sum(CreditNote.amount_minor), 0))
+        .where(CreditNote.invoice_id == invoice_id, CreditNote.status == "approved"))
+    return max(0, inv.total_minor - int(paid or 0) - int(credited or 0))
 
 
 def owner_credit_minor(db: Session, owner_id: int) -> int:
